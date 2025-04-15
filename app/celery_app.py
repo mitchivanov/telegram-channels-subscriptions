@@ -7,9 +7,15 @@ from aiogram import Bot
 import asyncio
 import logging
 
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://redis:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
+if not CELERY_BROKER_URL:
+    raise ValueError('Не задан CELERY_BROKER_URL в .env!')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND')
+if not CELERY_RESULT_BACKEND:
+    raise ValueError('Не задан CELERY_RESULT_BACKEND в .env!')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError('Не задан TELEGRAM_BOT_TOKEN в .env!')
 
 celery = Celery('aiogram', broker=CELERY_BROKER_URL, backend=CELERY_RESULT_BACKEND)
 

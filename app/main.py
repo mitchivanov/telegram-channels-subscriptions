@@ -22,7 +22,11 @@ from app.subscription_service import SubscriptionManager
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError('Не задан TELEGRAM_BOT_TOKEN в .env!')
 TELEGRAM_PAYMENT_TOKEN = os.getenv('TELEGRAM_PAYMENT_TOKEN')
+if not TELEGRAM_PAYMENT_TOKEN:
+    raise ValueError('Не задан TELEGRAM_PAYMENT_TOKEN в .env!')
 
 # Проверка тестового режима
 IS_TEST_MODE = os.getenv('PAYMENT_TEST_MODE', 'False').lower() in ('true', '1', 't')

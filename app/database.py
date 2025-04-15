@@ -59,7 +59,9 @@ class UserSubscription(Base):
         return f"<UserSubscription(id={self.id}, user_id={self.user_id}, plan_id={self.plan_id}, active={self.is_active})>"
 
 # Асинхронное подключение к PostgreSQL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://aiogram:aiogrampass@db:5432/aiogram")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("Не задана переменная окружения DATABASE_URL. Укажите её в .env!")
 
 def get_async_engine():
     return create_async_engine(DATABASE_URL, echo=True)

@@ -26,9 +26,13 @@ if PAYMENT_TEST_MODE:
     DURATION_MAP['5_min'] = 5 / (24 * 60)  # 5 минут в днях
 
 # ID каналов для разных типов подписок из .env
+BASIC_CHANNEL_ID = os.getenv('BASIC_CHANNEL_ID')
+PREMIUM_CHANNEL_ID = os.getenv('PREMIUM_CHANNEL_ID')
+if not BASIC_CHANNEL_ID or not PREMIUM_CHANNEL_ID:
+    raise ValueError("Не заданы переменные окружения BASIC_CHANNEL_ID и PREMIUM_CHANNEL_ID. Укажите их в .env!")
 CHANNEL_IDS = {
-    'basic_subscription': os.getenv('BASIC_CHANNEL_ID'),
-    'premium_subscription': os.getenv('PREMIUM_CHANNEL_ID')
+    'basic_subscription': BASIC_CHANNEL_ID,
+    'premium_subscription': PREMIUM_CHANNEL_ID
 }
 
 # Словарь для хранения соответствия ссылок-приглашений и пользователей
