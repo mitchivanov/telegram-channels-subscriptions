@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, JSON
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 import os
@@ -31,6 +31,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     telegram_user_id = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
+    email = Column(String, nullable=True)  # Поле для хранения электронной почты пользователя
     
     # Отношение с подписками пользователя
     subscriptions = relationship("UserSubscription", back_populates="user")
@@ -50,6 +51,7 @@ class UserSubscription(Base):
     is_active = Column(Boolean, default=True)
     invite_link = Column(String)  # Ссылка-приглашение в канал
     reminder_sent = Column(Boolean, default=False)  # Было ли отправлено напоминание о скором окончании
+    provider_payment_charge_id = Column(String, nullable=True)  # ID транзакции у платежного провайдера
     
     # Отношения
     user = relationship("User", back_populates="subscriptions")
@@ -57,6 +59,28 @@ class UserSubscription(Base):
     
     def __repr__(self):
         return f"<UserSubscription(id={self.id}, user_id={self.user_id}, plan_id={self.plan_id}, active={self.is_active})>"
+
+# Модель для хранения информации об ошибочных платежах
+class PaymentError(Base):
+    __tablename__ = 'payment_errors'
+    
+    id = Column(Integer, primary_key=True)
+    telegram_user_id = Column(String, nullable=False)
+    plan_id = Column(Integer, ForeignKey('subscription_plans.id'), nullable=True)
+    provider_payment_charge_id = Column(String, nullable=False)  # ID транзакции у платежного провайдера
+    payment_amount = Column(Integer, nullable=True)  # Сумма платежа в копейках
+    payment_currency = Column(String, nullable=True)  # Валюта платежа
+    payment_time = Column(DateTime, nullable=False, default=datetime.utcnow)
+    error_message = Column(Text, nullable=False)  # Сообщение об ошибке
+    invoice_payload = Column(String, nullable=True)  # Данные из payload инвойса
+    payment_info = Column(Text, nullable=True)  # Полная информация о платеже в виде текста
+    stack_trace = Column(Text, nullable=True)  # Стек вызовов с ошибкой
+    is_resolved = Column(Boolean, default=False)  # Был ли платеж обработан вручную
+    resolution_notes = Column(Text, nullable=True)  # Заметки о решении проблемы
+    resolution_time = Column(DateTime, nullable=True)  # Когда проблема была решена
+    
+    def __repr__(self):
+        return f"<PaymentError(id={self.id}, user_id='{self.telegram_user_id}', charge_id='{self.provider_payment_charge_id}', resolved={self.is_resolved})>"
 
 # Асинхронное подключение к PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL")

@@ -39,7 +39,7 @@ class SubscriptionManager:
             await self.session.rollback()
             raise e
     
-    async def subscribe_user(self, user_id, plan_id, start_date=None):
+    async def subscribe_user(self, user_id, plan_id, start_date=None, reminder_sent=None, commit: bool = True):
         """Подписать пользователя на тарифный план"""
         try:
             result_user = await self.session.execute(select(User).where(User.id == user_id))
@@ -63,11 +63,19 @@ class SubscriptionManager:
                 is_active=True
             )
             
+            # Устанавливаем reminder_sent, если он передан
+            if reminder_sent is not None:
+                subscription.reminder_sent = reminder_sent
+            
             self.session.add(subscription)
-            await self.session.commit()
+            if commit:
+                await self.session.commit()
+            else:
+                await self.session.flush()
             return subscription
         except SQLAlchemyError as e:
-            await self.session.rollback()
+            if commit:
+                await self.session.rollback()
             raise e
     
     async def cancel_subscription(self, subscription_id):
@@ -86,7 +94,7 @@ class SubscriptionManager:
             await self.session.rollback()
             raise e
     
-    async def extend_subscription(self, subscription_id, days):
+    async def extend_subscription(self, subscription_id, days, reminder_sent=None):
         """Продлить подписку на указанное количество дней"""
         try:
             result = await self.session.execute(select(UserSubscription).where(UserSubscription.id == subscription_id))
@@ -99,6 +107,10 @@ class SubscriptionManager:
             
             if not subscription.is_active and subscription.end_date > datetime.utcnow():
                 subscription.is_active = True
+            
+            # Устанавливаем reminder_sent, если он передан
+            if reminder_sent is not None:
+                subscription.reminder_sent = reminder_sent
             
             await self.session.commit()
             return subscription

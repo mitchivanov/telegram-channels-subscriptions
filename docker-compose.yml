@@ -51,8 +51,7 @@ services:
 
   redis:
     image: redis:7.0-alpine
-    ports:
-      - "6379:6379"
+
     restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -66,8 +65,7 @@ services:
       POSTGRES_DB: aiogram
       POSTGRES_USER: aiogram
       POSTGRES_PASSWORD: aiogrampass
-    ports:
-      - "5432:5432"
+
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aiogram"]

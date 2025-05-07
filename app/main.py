@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from app.subscription_service import subscription_service, SUBSCRIPTION_TYPE_MAP, DURATION_MAP, CHANNEL_IDS, INVITE_LINKS_MAP
-from app.database import User, UserSubscription, SubscriptionPlan, async_init_db
+from app.subscription_service import subscription_service, CHANNEL_IDS
+from app.database import User, UserSubscription, SubscriptionPlan, PaymentError, async_init_db
 from aiogram.types import LabeledPrice
 from aiogram.types.message import ContentType
 from aiogram.types import ChatJoinRequest
@@ -18,6 +18,7 @@ import traceback
 from datetime import datetime, timedelta
 from sqlalchemy import select
 from app.subscription_service import SubscriptionManager
+import json
 
 load_dotenv()
 
@@ -47,12 +48,22 @@ dp = Dispatcher(storage=storage)
 # Устанавливаем экземпляр бота в сервис подписок
 subscription_service.set_bot(bot)
 
+# Загрузка списка администраторов из .env
+ADMIN_USER_IDS = os.getenv('ADMIN_USER_IDS', '').split(',')
+if not ADMIN_USER_IDS[0]:
+    logging.warning("Не заданы ID администраторов (ADMIN_USER_IDS) в .env!")
 
 @dp.message(Command('start'))
 async def start_command(message: types.Message, state: FSMContext):
     # При старте сбрасываем состояние
     await state.clear()
-    await message.answer('Приветствую! Это бот для тестирования оплаты в Telegram', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    first_name = message.from_user.first_name or ''
+    text = (
+        f"Здравствуйте, {first_name}!\n"
+        f"Этот бот предоставляет подписку на телеграм-каналы с кэшбеком на WB.\n"
+        f"Для информации о тарифных планах нажмите кнопку \"Управление подпиской\" внизу."
+    )
+    await message.answer(text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
 
 @dp.message(F.text == 'Управление подпиской')
 async def manage_subscription(message: types.Message, state: FSMContext):
@@ -101,11 +112,26 @@ async def process_join_request(join_request: ChatJoinRequest):
         return
     
     # Проверяем, что запрос идет от правильного пользователя
-    if subscription_service.is_valid_join_request(invite_link, user_id):
+    is_valid = await subscription_service.is_valid_join_request(invite_link, user_id)
+    if is_valid:
         # Одобряем запрос
         try:
             await bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
             logging.info(f"Одобрен запрос на вступление для пользователя {user_id}")
+            
+            # Отзываем ссылку сразу после одобрения
+            try:
+                async with subscription_service.async_session_maker() as session:
+                    link_result = await session.execute(select(UserSubscription).where(UserSubscription.invite_link == invite_link))
+                    sub = link_result.scalar_one_or_none()
+                    if sub and sub.invite_link:
+                        await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=sub.invite_link)
+                        sub.invite_link = None
+                        session.add(sub)
+                        await session.commit()
+                        logging.info(f"Ссылка {invite_link} отозвана после успешного вступления пользователя {user_id}")
+            except Exception as e:
+                logging.error(f"Ошибка при отзыве ссылки после вступления: {str(e)}")
             
             # Оповещаем пользователя об успешном вступлении
             try:
@@ -139,209 +165,114 @@ async def process_join_request(join_request: ChatJoinRequest):
 async def buy_subscription(callback: types.CallbackQuery, state: FSMContext):
     # Переходим в состояние выбора типа подписки
     await state.set_state(SubscriptionStates.choosing_type)
-    await callback.message.answer('Выберите тип подписки:', reply_markup=await get_inline_keyboard(keyboard_type='choose_subscription_type'))
+    # Получаем все тарифы из базы
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(SubscriptionPlan))
+        plans = result.scalars().all()
+    # Формируем клавиатуру с вариантами тарифов
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
+            for plan in plans
+        ]
+    )
+    try:
+        await callback.message.edit_text('Выберите тип подписки:', reply_markup=keyboard)
+    except Exception as e:
+        await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
 
-@dp.callback_query(SubscriptionStates.choosing_type, F.data.in_(['basic_subscription', 'premium_subscription']))
-async def process_subscription_type(callback: types.CallbackQuery, state: FSMContext):
-    subscription_type = callback.data
-    await state.update_data(subscription_type=subscription_type)
-
-    # Выбор длительности
-    durations = [('30_days', '30 дней')]
-    if IS_TEST_MODE and subscription_type == 'basic_subscription':
-        durations.insert(0, ('5_min', '5 минут (тест)'))
-
-    # Если несколько вариантов, спрашиваем пользователя
-    if len(durations) > 1:
-        # Сохраняем список в state
-        await state.update_data(available_durations=durations)
-        # Формируем inline-клавиатуру корректно для aiogram v3+
-        keyboard = types.InlineKeyboardMarkup(
+async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False):
+    preview_text = (
+        f"Вы выбрали {'продление подписки' if is_extension else 'подписку'}: {plan.name}\n"
+        f"Описание: {plan.description or '-'}\n"
+        f"Длительность: {plan.duration_days} дней\n"
+        f"Стоимость: {plan.price/100:.2f} руб.\n\n"
+        f"Нажмите кнопку ниже для оплаты:"
+    )
+    try:
+        if edit:
+            await callback.message.edit_text(preview_text)
+        else:
+            await callback.message.answer(preview_text)
+    except Exception as e:
+        logging.error(f"Ошибка при отправке превью подписки: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+        await callback.message.answer(preview_text)
+    try:
+        # Подготавливаем данные для чека (provider_data)
+        provider_data = {
+            "receipt": {
+                "items": [
+                    {
+                        "description": f"{'Продление подписки' if is_extension else 'Подписка'} {plan.name} на {plan.duration_days} дней",
+                        "quantity": 1.0,
+                        "amount": {
+                            "value": plan.price / 100,  # В рублях, а не копейках
+                            "currency": "RUB"
+                        },
+                        "vat_code": 1,  # НДС 20%
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service"  # Услуга
+                    }
+                ],
+                "tax_system_code": 1  # Общая система налогообложения
+            }
+        }
+        provider_data_json = json.dumps(provider_data)
+        # Клавиатура только для инвойса
+        invoice_keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
-                [types.InlineKeyboardButton(text=d_label, callback_data=f'duration_{d_key}')]
-                for d_key, d_label in durations
+                [types.InlineKeyboardButton(text="Оплатить", pay=True)],
+                [types.InlineKeyboardButton(text="↩️ Назад к выбору тарифа", callback_data="back_to_plan_selection")]
             ]
         )
-        await callback.message.answer('Выберите длительность подписки:', reply_markup=keyboard)
-        return
-    else:
-        duration = durations[0][0]
-        await state.update_data(duration=duration)
-
-    # Сохраняем информацию о канале
-    channel_id = CHANNEL_IDS.get(subscription_type, 'Неизвестно')
-    await state.update_data(channel_id=channel_id)
-
-    # Устанавливаем цену
-    if subscription_type == 'basic_subscription' and IS_TEST_MODE and duration == '5_min':
-        plan_price = 6900
-    elif subscription_type == 'basic_subscription':
-        plan_price = 10000
-    else:
-        plan_price = 20000
-    await state.update_data(plan_price=plan_price)
-
-    # Информация о выбранной подписке для подтверждения
-    subscription_info = {
-        'basic_subscription': 'Базовый',
-        'premium_subscription': 'Премиум',
-        '30_days': '30 дней',
-        '5_min': '5 минут (тест)'
-    }
-
-    channel_type = "Базовый канал" if subscription_type == 'basic_subscription' else "Премиум канал"
-    await state.set_state(SubscriptionStates.confirming_payment)
-    message_text = (
-        f"Вы выбрали подписку: {subscription_info[subscription_type]}\n"
-        f"Длительность: {subscription_info.get(duration, duration)}\n"
-        f"Стоимость: {plan_price/100} руб.\n"
-        f"Доступ к каналу: {channel_type}\n\n"
-        f"Пожалуйста, подтвердите оплату:"
-    )
-    await callback.message.answer(message_text, reply_markup=await get_inline_keyboard(keyboard_type='confirm_payment'))
-
-# Обработка выбора длительности
-@dp.callback_query(lambda c: c.data.startswith('duration_'))
-async def choose_duration(callback: types.CallbackQuery, state: FSMContext):
-    duration = callback.data.replace('duration_', '')
-    await state.update_data(duration=duration)
-    user_data = await state.get_data()
-    subscription_type = user_data.get('subscription_type')
-    # Сохраняем информацию о канале
-    channel_id = CHANNEL_IDS.get(subscription_type, 'Неизвестно')
-    await state.update_data(channel_id=channel_id)
-    # Устанавливаем цену
-    if subscription_type == 'basic_subscription' and IS_TEST_MODE and duration == '5_min':
-        plan_price = 6900
-    elif subscription_type == 'basic_subscription':
-        plan_price = 10000
-    else:
-        plan_price = 20000
-    await state.update_data(plan_price=plan_price)
-    subscription_info = {
-        'basic_subscription': 'Базовый',
-        'premium_subscription': 'Премиум',
-        '30_days': '30 дней',
-        '5_min': '5 минут (тест)'
-    }
-    channel_type = "Базовый канал" if subscription_type == 'basic_subscription' else "Премиум канал"
-    await state.set_state(SubscriptionStates.confirming_payment)
-    message_text = (
-        f"Вы выбрали подписку: {subscription_info[subscription_type]}\n"
-        f"Длительность: {subscription_info.get(duration, duration)}\n"
-        f"Стоимость: {plan_price/100} руб.\n"
-        f"Доступ к каналу: {channel_type}\n\n"
-        f"Пожалуйста, подтвердите оплату:"
-    )
-    await callback.message.answer(message_text, reply_markup=await get_inline_keyboard(keyboard_type='confirm_payment'))
-
-@dp.callback_query(SubscriptionStates.confirming_payment, F.data == 'confirm_payment')
-async def confirm_payment(callback: types.CallbackQuery, state: FSMContext):
-    user_data = await state.get_data()
-    subscription_type = user_data.get('subscription_type')
-    duration = user_data.get('duration')
-    plan_price = user_data.get('plan_price', 0)
-    subscription_info = {
-        'basic_subscription': 'Базовый',
-        'premium_subscription': 'Премиум',
-        '30_days': '30 дней',
-        '5_min': '5 минут (тест)'
-    }
-    title = f"Подписка {subscription_info[subscription_type]}"
-    description = f"Подписка {subscription_info[subscription_type]} на {subscription_info.get(duration, duration)}"
-    payload = f"{subscription_type}:{duration}"
-    start_parameter = "subscription_payment"
-    currency = "RUB"
-    prices = [LabeledPrice(label=title, amount=plan_price)]
-    logging.info(f"Отправка инвойса: {title}, {description}, {payload}, {TELEGRAM_PAYMENT_TOKEN[:10]}..., {currency}, {prices}")
-    try:
-        await bot.send_invoice(
+        
+        # Формируем payload в зависимости от типа операции (новая подписка или продление)
+        payload = f"extend_{plan.id}" if is_extension else f"plan_{plan.id}"
+        
+        invoice_message = await bot.send_invoice(
             chat_id=callback.from_user.id,
-            title=title,
-            description=description,
+            title=f"{'Продление подписки' if is_extension else 'Подписка'} {plan.name}",
+            description=f"Оплата {'продления доступа' if is_extension else 'доступа'} к тарифу {plan.name}, продолжительность - {plan.duration_days} дней",
             payload=payload,
             provider_token=TELEGRAM_PAYMENT_TOKEN,
-            currency=currency,
-            prices=prices,
-            start_parameter=start_parameter,
+            currency="RUB",
+            prices=[LabeledPrice(label=plan.name, amount=plan.price)],
+            start_parameter="subscription_payment",
             need_name=False,
             need_phone_number=False,
-            need_email=False,
+            need_email=True,
+            send_email_to_provider=True,
             need_shipping_address=False,
             is_flexible=False,
-            protect_content=True
+            protect_content=True,
+            provider_data=provider_data_json,
+            reply_markup=invoice_keyboard
         )
+        # Сохраняем id сообщений для удаления
+        await state.update_data(preview_msg_id=callback.message.message_id, invoice_msg_id=invoice_message.message_id)
+        logging.info(f"[INVOICE] Инвойс успешно отправлен пользователю {callback.from_user.id}")
     except Exception as e:
-        logging.error(f"Ошибка при создании платежа: {str(e)}")
+        logging.error(f"[INVOICE][ERROR] Ошибка при создании платежа: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+        logging.error(f"[INVOICE][ERROR] Параметры платежа при ошибке: chat_id={callback.from_user.id}, title={plan.name}, description=Оплата доступа к тарифу {plan.name}, продолжительность - {plan.duration_days} дней, payload=plan_{plan.id}, provider_token={TELEGRAM_PAYMENT_TOKEN}, currency=RUB, price={plan.price}, need_email=True, send_email_to_provider=True")
         await callback.message.answer(
             f"Произошла ошибка при создании платежа: {str(e)}",
             reply_markup=await get_reply_keyboard(keyboard_type='start')
         )
         await state.clear()
 
-# Обработчик пре-чекаута (проверка платежа перед выполнением)
-@dp.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
-    # Здесь можно выполнить дополнительные проверки, например, доступность товара
-    # Для примера, всегда подтверждаем платеж
-    logging.info(f"Получен pre_checkout_query: {pre_checkout_query}")
-    
-    try:
-        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-        logging.info("Pre-checkout подтвержден")
-    except Exception as e:
-        logging.error(f"Ошибка при подтверждении pre-checkout: {str(e)}")
-        await bot.answer_pre_checkout_query(
-            pre_checkout_query.id, 
-            ok=False, 
-            error_message="Произошла ошибка при проверке платежа. Пожалуйста, попробуйте позже."
-        )
-
-# Обработчик успешного платежа
-@dp.message(F.content_type == ContentType.SUCCESSFUL_PAYMENT)
-async def process_successful_payment(message: types.Message, state: FSMContext):
-    payment = message.successful_payment
-    logging.info(f"Получен успешный платеж: {payment}")
-    subscription_type, duration = payment.invoice_payload.split(':')
-    try:
-        subscription = await subscription_service.create_subscription(
-            message.from_user.id, 
-            subscription_type, 
-            duration
-        )
-        plan_name = SUBSCRIPTION_TYPE_MAP[subscription_type]
-        # Для тестовой подписки корректно отображаем срок
-        if duration == '5_min':
-            end_date = (subscription.start_date + timedelta(minutes=5)).strftime('%d.%m.%Y %H:%M')
-            duration_text = '5 минут (тест)'
-        else:
-            end_date = subscription.end_date.strftime('%d.%m.%Y')
-            duration_text = '30 дней'
-        success_message = (
-            f"Платеж успешно проведен!\n"
-            f"Подписка '{plan_name}' на {duration_text} активирована.\n"
-            f"Действует до: {end_date}"
-        )
-        if subscription.invite_link:
-            success_message += (
-                f"\n\nДля доступа к каналу используйте ссылку: {subscription.invite_link}\n"
-                f"⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. "
-                f"Ваш запрос будет автоматически одобрен, так как ссылка персональная."
-            )
-        else:
-            success_message += "\n\nНе удалось создать ссылку для приглашения в канал, пожалуйста, обратитесь в поддержку."
-        await message.answer(
-            success_message,
-            reply_markup=await get_reply_keyboard(keyboard_type='start')
-        )
-    except Exception as e:
-        logging.error(f"Ошибка при активации подписки: {str(e)}")
-        await message.answer(
-            f"Платеж успешно проведен, но произошла ошибка при активации подписки: {str(e)}\n"
-            f"Пожалуйста, обратитесь в поддержку.",
-            reply_markup=await get_reply_keyboard(keyboard_type='start')
-        )
-    await state.clear()
+@dp.callback_query(SubscriptionStates.choosing_type, lambda c: c.data.startswith('plan_'))
+async def process_subscription_plan(callback: types.CallbackQuery, state: FSMContext):
+    plan_id = int(callback.data.replace('plan_', ''))
+    # Получаем тариф из базы
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+        plan = result.scalar_one_or_none()
+    if not plan:
+        await callback.message.answer('Ошибка: выбранный тариф не найден.')
+        return
+    await state.update_data(plan_id=plan_id)
+    # Показываем превью и инвойс
+    await send_invoice_for_plan(callback, state, plan, edit=True)
 
 @dp.callback_query(F.data == 'cancel_payment')
 async def cancel_payment(callback: types.CallbackQuery, state: FSMContext):
@@ -352,6 +283,15 @@ async def cancel_payment(callback: types.CallbackQuery, state: FSMContext):
 async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer('Вы вернулись в главное меню', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+
+@dp.callback_query(F.data == 'cancel_subscription')
+async def cancel_subscription_request(callback: types.CallbackQuery, state: FSMContext):
+    """Запрос на отмену подписки - показывает подтверждение"""
+    await callback.message.answer(
+        "⚠️ Вы уверены, что хотите отменить подписку? Доступ к каналу будет отозван, деньги за неиспользованный период не возвращаются.",
+        reply_markup=await get_inline_keyboard(keyboard_type='confirm_cancel_subscription')
+    )
+    await callback.answer()
 
 @dp.callback_query(F.data == 'extend_subscription')
 async def extend_subscription(callback: types.CallbackQuery, state: FSMContext):
@@ -368,57 +308,404 @@ async def extend_subscription(callback: types.CallbackQuery, state: FSMContext):
     async with subscription_service.async_session_maker() as session:
         result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == subscription.plan_id))
         plan = result.scalar_one_or_none()
-    # Определяем срок продления
-    if plan and plan.name == 'Базовый 5 минут':
-        days = 5 / (24 * 60)
-        duration_text = '5 минут (тест)'
-    else:
-        days = 30
-        duration_text = '30 дней'
-    # Продлеваем подписку
-    async with subscription_service.async_session_maker() as session:
-        manager = SubscriptionManager(session)
-        subscription = await manager.extend_subscription(subscription.id, days)
-        subscription.reminder_sent = False
-        session.add(subscription)
-        await session.commit()
-    # Генерируем новую ссылку-приглашение, если требуется
-    invite_link = None
-    if plan and plan.channel_id and subscription_service.bot:
-        try:
-            invite_link = await subscription_service.create_channel_invite(plan.channel_id, user.telegram_user_id)
-            async with subscription_service.async_session_maker() as session:
-                result = await session.execute(select(UserSubscription).where(UserSubscription.id == subscription.id))
-                sub = result.scalar_one_or_none()
-                if sub:
-                    sub.invite_link = invite_link
-                    session.add(sub)
-                    await session.commit()
-        except Exception as e:
-            invite_link = None
-    # Формируем сообщение
-    end_date = subscription.end_date.strftime('%d.%m.%Y %H:%M') if plan and plan.name == 'Базовый 5 минут' else subscription.end_date.strftime('%d.%m.%Y')
-    message = f'Подписка успешно продлена!\nНовая дата окончания: {end_date}'
-    if invite_link:
-        message += f"\n\nВаша новая ссылка для входа в канал: {invite_link}\n⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. Ваш запрос будет автоматически одобрен."
-    await callback.message.answer(message, reply_markup=await get_reply_keyboard(keyboard_type='start'))
-    await callback.answer()
+    if not plan:
+        await callback.message.answer('Ошибка: тариф не найден.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        return
+    
+    # Сохраняем информацию о текущей подписке в состоянии для использования после оплаты
+    await state.update_data(
+        extend_subscription_id=subscription.id,
+        plan_id=plan.id,
+    )
+    
+    # Отправляем инвойс для оплаты продления
+    await send_invoice_for_plan(callback, state, plan, edit=False, is_extension=True)
 
 @dp.callback_query(F.data == 'confirm_cancel_subscription')
 async def confirm_cancel_subscription(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await subscription_service.get_user_by_telegram_id(user_id)
+    logging.info(f"[CANCEL] Пользователь {user_id} инициировал отмену подписки")
     # Получаем активные подписки асинхронно
     async with subscription_service.async_session_maker() as session:
         result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id, UserSubscription.is_active == True))
         active_subs = result.scalars().all()
     if not active_subs:
+        logging.warning(f"[CANCEL] Нет активной подписки для пользователя {user_id}")
         await callback.message.answer('У вас нет активной подписки для отмены.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
         return
     subscription = active_subs[0]
-    await subscription_service.remove_user_access(subscription)
-    await callback.message.answer('Ваша подписка отменена. Доступ к каналу отозван. Деньги за неиспользованный период не возвращаются.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    
+    # Получаем информацию о плане подписки, чтобы знать channel_id
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == subscription.plan_id))
+        plan = result.scalar_one_or_none()
+    
+    if not plan:
+        logging.error(f"[CANCEL] Не найден тариф для подписки {subscription.id}")
+        await callback.message.answer('Ошибка: не удалось найти тариф для вашей подписки.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        return
+    
+    # Устанавливаем channel_id из плана в подписку для метода remove_user_access
+    subscription.channel_id = plan.channel_id
+    logging.info(f"[CANCEL] Передаю подписку {subscription.id} с channel_id={subscription.channel_id} в remove_user_access")
+    
+    # Отзываем доступ
+    success = await subscription_service.remove_user_access(subscription)
+    
+    # Проверяем статус подписки после отмены
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(UserSubscription).where(UserSubscription.id == subscription.id))
+        updated_sub = result.scalar_one_or_none()
+        logging.info(f"[CANCEL] Статус подписки после отмены: is_active={getattr(updated_sub, 'is_active', None)}, invite_link={getattr(updated_sub, 'invite_link', None)}")
+    
+    if success:
+        await callback.message.answer('Ваша подписка отменена. Доступ к каналу отозван. Деньги за неиспользованный период не возвращаются.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    else:
+        await callback.message.answer('Произошла ошибка при отмене подписки. Пожалуйста, попробуйте позже или обратитесь в поддержку.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    
     await callback.answer()
+
+# Обработчик предварительной проверки платежа (обязательно нужен для работы платежей)
+@dp.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
+    logging.info(f"[PRE_CHECKOUT] Получен pre_checkout_query: {pre_checkout_query}")
+    try:
+        payload = pre_checkout_query.invoice_payload
+        logging.info(f"[PRE_CHECKOUT] Payload: {payload}")
+        
+        if payload.startswith('plan_') or payload.startswith('extend_'):
+            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+            logging.info(f"[PRE_CHECKOUT] Pre-checkout подтвержден для запроса {pre_checkout_query.id}")
+        else:
+            logging.error(f"[PRE_CHECKOUT][ERROR] Некорректный формат payload: {payload}")
+            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Ошибка обработки платежа: некорректный формат данных.")
+    except Exception as e:
+        logging.error(f"[PRE_CHECKOUT][ERROR] Ошибка при обработке pre_checkout_query: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Ошибка обработки платежа. Пожалуйста, попробуйте позже.")
+
+
+# Обработчик успешной оплаты
+@dp.message(F.content_type == ContentType.SUCCESSFUL_PAYMENT)
+async def process_successful_payment(message: types.Message, state: FSMContext):
+    logging.info(f"[PAYMENT] Получено уведомление об успешном платеже: {message.successful_payment}")
+    try:
+        payment_info = message.successful_payment
+        payload = payment_info.invoice_payload
+        provider_payment_charge_id = payment_info.provider_payment_charge_id
+        logging.info(f"[PAYMENT] payload={payload}, charge_id={provider_payment_charge_id}, сумма={payment_info.total_amount}, валюта={payment_info.currency}, order_info={payment_info.order_info}")
+        
+        # Обработка различных типов платежей
+        if payload.startswith('plan_'):
+            # Создание новой подписки
+            plan_id = int(payload.replace('plan_', ''))
+            try:
+                # КРИТИЧЕСКАЯ ОПЕРАЦИЯ: создание подписки
+                logging.info(f"[PAYMENT] Начинаем создание подписки для пользователя {message.from_user.id}, план {plan_id}")
+                subscription_id = await subscription_service.create_subscription(
+                    message.from_user.id, 
+                    plan_id=plan_id
+                )
+                logging.info(f"[PAYMENT] Подписка успешно создана с ID={subscription_id}")
+                
+                # Сохраняем provider_payment_charge_id в подписке в новой сессии
+                async with subscription_service.async_session_maker() as session:
+                    result = await session.execute(select(UserSubscription).where(UserSubscription.id == subscription_id))
+                    sub = result.scalar_one_or_none()
+                    if sub:
+                        logging.info(f"[PAYMENT] Найдена подписка для сохранения charge_id: {sub}")
+                        sub.provider_payment_charge_id = provider_payment_charge_id
+                        session.add(sub)
+                        await session.commit()
+                        logging.info(f"[PAYMENT] Сохранён provider_payment_charge_id в подписке: {sub}")
+                    else:
+                        logging.error(f"[PAYMENT][ERROR] Не удалось найти подписку для сохранения charge_id")
+                # Получаем информацию о плане для формирования ответа
+                plan = None
+                subscription = None
+                async with subscription_service.async_session_maker() as session:
+                    result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+                    plan = result.scalar_one_or_none()
+                if not plan:
+                    raise ValueError(f"План с ID {plan_id} не найден после оплаты")
+                # Получаем подписку для отображения даты окончания
+                async with subscription_service.async_session_maker() as session:
+                    result = await session.execute(select(UserSubscription).where(UserSubscription.id == subscription_id))
+                    subscription = result.scalar_one_or_none()
+                if not subscription:
+                    raise ValueError(f"Подписка с ID {subscription_id} не найдена после сохранения")
+                    
+                response_text = f"✅ Оплата успешно выполнена!\n\n"
+                response_text += f"Подписка: {plan.name}\n"
+                response_text += f"Срок действия: до {subscription.end_date.strftime('%d.%m.%Y')}\n\n"
+                if hasattr(subscription, 'invite_link') and subscription.invite_link:
+                    response_text += f"Ссылка для входа в канал: {subscription.invite_link}\n"
+                    response_text += "⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. Ваш запрос будет автоматически одобрен."
+                await message.answer(response_text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                logging.info(f"[PAYMENT] Подписка успешно создана для пользователя {message.from_user.id}, план {plan_id}, charge_id={provider_payment_charge_id}")
+                # Логируем содержимое подписки из базы
+                logging.info(f"[PAYMENT] Итоговое состояние подписки в базе: {subscription}")
+            except Exception as e:
+                stack_trace = traceback.format_exc()
+                logging.critical(f"[PAYMENT][CRITICAL_ERROR] Ошибка при создании подписки после оплаты: {str(e)}\nTRACEBACK: {stack_trace}")
+                
+                # Сохраняем информацию об ошибке в базу данных
+                try:
+                    async with subscription_service.async_session_maker() as session:
+                        payment_error = PaymentError(
+                            telegram_user_id=str(message.from_user.id),
+                            plan_id=plan_id,
+                            provider_payment_charge_id=provider_payment_charge_id,
+                            payment_amount=payment_info.total_amount,
+                            payment_currency=payment_info.currency,
+                            error_message=str(e),
+                            invoice_payload=payload,
+                            payment_info=str(payment_info),
+                            stack_trace=stack_trace
+                        )
+                        session.add(payment_error)
+                        await session.commit()
+                        logging.info(f"[PAYMENT][ERROR_SAVED] Информация об ошибке сохранена в базу данных с ID={payment_error.id}")
+                except Exception as db_error:
+                    logging.critical(f"[PAYMENT][DB_ERROR] Не удалось сохранить информацию об ошибке в базу данных: {str(db_error)}")
+                
+                # Экстренное сохранение информации о платеже в логах для ручного восстановления
+                emergency_info = {
+                    "user_id": message.from_user.id,
+                    "plan_id": plan_id,
+                    "charge_id": provider_payment_charge_id,
+                    "payment_time": datetime.now().isoformat(),
+                    "payment_info": str(payment_info),
+                    "error": str(e)
+                }
+                logging.critical(f"[PAYMENT][EMERGENCY] Данные платежа для ручного восстановления: {emergency_info}")
+                
+                await message.answer("⚠️ Платеж выполнен, но возникла техническая ошибка при активации подписки. Наши специалисты уже работают над этим и восстановят ваш доступ в ближайшее время. Пожалуйста, сохраните этот чат для подтверждения оплаты.", 
+                                   reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        
+        elif payload.startswith('extend_'):
+            # Продление существующей подписки
+            plan_id = int(payload.replace('extend_', ''))
+            
+            try:
+                # Получаем данные из состояния
+                user_data = await state.get_data()
+                subscription_id = user_data.get('extend_subscription_id')
+                
+                if not subscription_id:
+                    raise ValueError("Не найден ID подписки для продления")
+                
+                logging.info(f"[PAYMENT][EXTEND] Начинаем продление подписки ID={subscription_id}, план {plan_id}")
+                
+                # Получаем информацию о плане
+                async with subscription_service.async_session_maker() as session:
+                    result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+                    plan = result.scalar_one_or_none()
+                
+                if not plan:
+                    raise ValueError(f"План с ID {plan_id} не найден для продления")
+                
+                days = plan.duration_days
+                
+                # Продляем подписку
+                async with subscription_service.async_session_maker() as session:
+                    manager = SubscriptionManager(session)
+                    subscription = await manager.extend_subscription(subscription_id, days, reminder_sent=False)
+                    
+                    # Сохраняем информацию о платеже
+                    subscription.provider_payment_charge_id = provider_payment_charge_id
+                    
+                    await session.commit()
+                
+                # Генерируем новую ссылку-приглашение
+                invite_link = None
+                user = await subscription_service.get_user_by_telegram_id(message.from_user.id)
+                
+                if plan.channel_id and subscription_service.bot:
+                    try:
+                        invite_link = await subscription_service.create_channel_invite(plan.channel_id, user.telegram_user_id)
+                        async with subscription_service.async_session_maker() as session:
+                            result = await session.execute(select(UserSubscription).where(UserSubscription.id == subscription.id))
+                            sub = result.scalar_one_or_none()
+                            if sub:
+                                sub.invite_link = invite_link
+                                session.add(sub)
+                                await session.commit()
+                    except Exception as e:
+                        logging.error(f"[PAYMENT][EXTEND] Ошибка при создании ссылки-приглашения: {str(e)}")
+                        invite_link = None
+                
+                # Формируем ответ
+                end_date = subscription.end_date.strftime('%d.%m.%Y')
+                response_text = f"✅ Оплата успешно выполнена!\n\n"
+                response_text += f"Подписка продлена: {plan.name}\n"
+                response_text += f"Срок действия: до {end_date}\n\n"
+                
+                if invite_link:
+                    response_text += f"Ваша новая ссылка для входа в канал: {invite_link}\n"
+                    response_text += "⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. Ваш запрос будет автоматически одобрен."
+                
+                await message.answer(response_text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                logging.info(f"[PAYMENT][EXTEND] Подписка успешно продлена для пользователя {message.from_user.id}, ID={subscription.id}, план {plan_id}")
+            
+            except Exception as e:
+                stack_trace = traceback.format_exc()
+                logging.critical(f"[PAYMENT][EXTEND][ERROR] Ошибка при продлении подписки: {str(e)}\nTRACEBACK: {stack_trace}")
+                
+                # Сохраняем информацию об ошибке
+                try:
+                    async with subscription_service.async_session_maker() as session:
+                        payment_error = PaymentError(
+                            telegram_user_id=str(message.from_user.id),
+                            plan_id=plan_id,
+                            provider_payment_charge_id=provider_payment_charge_id,
+                            payment_amount=payment_info.total_amount,
+                            payment_currency=payment_info.currency,
+                            error_message=f"Ошибка при продлении подписки: {str(e)}",
+                            invoice_payload=payload,
+                            payment_info=str(payment_info),
+                            stack_trace=stack_trace
+                        )
+                        session.add(payment_error)
+                        await session.commit()
+                        logging.info(f"[PAYMENT][EXTEND][ERROR_SAVED] Информация об ошибке продления сохранена в БД с ID={payment_error.id}")
+                except Exception as db_error:
+                    logging.critical(f"[PAYMENT][EXTEND][DB_ERROR] Не удалось сохранить информацию об ошибке в БД: {str(db_error)}")
+                
+                await message.answer("⚠️ Платеж выполнен, но возникла техническая ошибка при продлении подписки. Наши специалисты уже работают над этим и скоро восстановят ваш доступ.", 
+                                   reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        
+        else:
+            logging.error(f"[PAYMENT][ERROR] Некорректный формат payload после оплаты: {payload}")
+            await message.answer("Произошла ошибка при обработке платежа. Пожалуйста, обратитесь в поддержку.", 
+                               reply_markup=await get_reply_keyboard(keyboard_type='start'))
+            return
+            
+    except Exception as e:
+        stack_trace = traceback.format_exc()
+        logging.error(f"[PAYMENT][ERROR] Ошибка при обработке успешного платежа: {str(e)}\nTRACEBACK: {stack_trace}")
+        
+        # Пытаемся сохранить информацию об ошибке в базу данных, даже если не удалось получить детали платежа
+        try:
+            if 'payment_info' in locals():
+                async with subscription_service.async_session_maker() as session:
+                    payment_error = PaymentError(
+                        telegram_user_id=str(message.from_user.id),
+                        provider_payment_charge_id=getattr(payment_info, 'provider_payment_charge_id', 'unknown'),
+                        payment_amount=getattr(payment_info, 'total_amount', None),
+                        payment_currency=getattr(payment_info, 'currency', None),
+                        error_message=str(e),
+                        invoice_payload=getattr(payment_info, 'invoice_payload', None),
+                        payment_info=str(payment_info) if 'payment_info' in locals() else None,
+                        stack_trace=stack_trace
+                    )
+                    session.add(payment_error)
+                    await session.commit()
+                    logging.info(f"[PAYMENT][ERROR_SAVED] Информация об общей ошибке сохранена в базу данных с ID={payment_error.id}")
+        except Exception as db_error:
+            logging.critical(f"[PAYMENT][DB_ERROR] Не удалось сохранить информацию об общей ошибке в базу данных: {str(db_error)}")
+        
+        await message.answer("Произошла ошибка при обработке платежа. Пожалуйста, обратитесь в поддержку.", 
+                           reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    finally:
+        await state.clear()
+
+# Добавляем обработчик для кнопки "Назад к выбору тарифа"
+@dp.callback_query(F.data == 'back_to_plan_selection')
+async def back_to_plan_selection(callback: types.CallbackQuery, state: FSMContext):
+    # Получаем id сообщений для удаления
+    data = await state.get_data()
+    preview_msg_id = data.get('preview_msg_id')
+    invoice_msg_id = data.get('invoice_msg_id')
+    # Удаляем оба сообщения, если они есть
+    try:
+        if invoice_msg_id:
+            await callback.bot.delete_message(callback.message.chat.id, invoice_msg_id)
+        if preview_msg_id:
+            await callback.bot.delete_message(callback.message.chat.id, preview_msg_id)
+    except Exception as e:
+        logging.error(f"[BACK] Ошибка при удалении сообщений: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+    # Переходим обратно к выбору тарифа
+    await state.set_state(SubscriptionStates.choosing_type)
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(SubscriptionPlan))
+        plans = result.scalars().all()
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
+            for plan in plans
+        ]
+    )
+    await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
+    await callback.answer()
+
+# Admin commands
+@dp.message(Command('payment_errors'), lambda msg: str(msg.from_user.id) in ADMIN_USER_IDS)
+async def show_payment_errors(message: types.Message, state: FSMContext):
+    """Показать неразрешенные ошибки платежей (только для админов)"""
+    async with subscription_service.async_session_maker() as session:
+        result = await session.execute(select(PaymentError).where(PaymentError.is_resolved == False))
+        errors = result.scalars().all()
+    
+    if not errors:
+        await message.answer("Нет неразрешенных ошибок платежей.")
+        return
+    
+    for error in errors:
+        error_text = (
+            f"🚨 Ошибка платежа #{error.id}:\n"
+            f"Пользователь: {error.telegram_user_id}\n"
+            f"Время платежа: {error.payment_time.strftime('%d.%m.%Y %H:%M:%S')}\n"
+            f"ID транзакции: {error.provider_payment_charge_id}\n"
+            f"Сумма: {error.payment_amount/100 if error.payment_amount else 'N/A'} {error.payment_currency or 'N/A'}\n"
+            f"План: {error.plan_id or 'N/A'}\n"
+            f"Ошибка: {error.error_message}\n\n"
+            f"Для разрешения используйте команду:\n"
+            f"/resolve_payment_error {error.id} <причина решения>"
+        )
+        await message.answer(error_text)
+
+@dp.message(lambda msg: msg.text and msg.text.startswith('/resolve_payment_error'), lambda msg: str(msg.from_user.id) in ADMIN_USER_IDS)
+async def resolve_payment_error(message: types.Message, state: FSMContext):
+    """Отметить ошибку платежа как разрешенную (только для админов)"""
+    try:
+        parts = message.text.split(' ', 2)
+        if len(parts) < 2:
+            await message.answer("Неверный формат команды. Используйте: /resolve_payment_error ID <причина решения>")
+            return
+        
+        error_id = int(parts[1])
+        notes = parts[2] if len(parts) > 2 else "Разрешено администратором"
+        
+        async with subscription_service.async_session_maker() as session:
+            result = await session.execute(select(PaymentError).where(PaymentError.id == error_id))
+            error = result.scalar_one_or_none()
+            
+            if not error:
+                await message.answer(f"Ошибка платежа с ID {error_id} не найдена.")
+                return
+            
+            error.is_resolved = True
+            error.resolution_notes = notes
+            error.resolution_time = datetime.utcnow()
+            session.add(error)
+            await session.commit()
+        
+        await message.answer(f"✅ Ошибка платежа #{error_id} помечена как разрешенная.")
+        
+        # Отправляем уведомление пользователю
+        try:
+            await bot.send_message(
+                chat_id=error.telegram_user_id,
+                text="✅ Проблема с вашим платежом была разрешена администратором. Если у вас остались вопросы, пожалуйста, свяжитесь с поддержкой."
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление пользователю {error.telegram_user_id}: {str(e)}")
+    
+    except ValueError:
+        await message.answer("Неверный формат ID. Используйте: /resolve_payment_error ID <причина решения>")
+    except Exception as e:
+        await message.answer(f"Произошла ошибка: {str(e)}")
 
 async def monitor_subscriptions():
     """Фоновая задача для мониторинга подписок и отзыва доступа"""
@@ -448,6 +735,8 @@ async def monitor_subscriptions():
             for sub in expired:
                 user = await subscription_service.get_user_by_telegram_id(sub.user_id)
                 try:
+                    # Отзываем доступ и ссылку (invite_link будет очищен)
+                    logging.info(f"Отзыв доступа и ссылки для истекшей подписки {sub.id}, user_id={sub.user_id}")
                     await subscription_service.remove_user_access(sub)
                     if user:
                         await bot.send_message(
@@ -497,6 +786,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main()) 
+
+
 
 
 

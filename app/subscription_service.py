@@ -35,10 +35,6 @@ CHANNEL_IDS = {
     'premium_subscription': PREMIUM_CHANNEL_ID
 }
 
-# Словарь для хранения соответствия ссылок-приглашений и пользователей
-# Формат: {invite_link: telegram_user_id}
-INVITE_LINKS_MAP = {}
-
 class SubscriptionService:
     def __init__(self, async_session_maker=None):
         self.engine = None
@@ -63,12 +59,12 @@ class SubscriptionService:
             # Базовый план на разные сроки
             plans = [
                 # Базовые планы
-                {'name': 'Базовый 30 дней', 'description': 'Базовая подписка на 30 дней', 
+                {'name': 'Умная экономия', 'description': '- товары с кешбэком до 90%\n- выбор категорий товаров\n- более 20 товаров с кешбэком 100% ежемесячно\n- ежемесячный розыгрыш товаров', 
                  'price': 10000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['basic_subscription']},
 
                 
                 # Премиум планы
-                {'name': 'Премиум 30 дней', 'description': 'Премиум подписка на 30 дней', 
+                {'name': 'Premium кешбэк', 'description': '- товары с кешбэком от 90%\n- выбор категорий товаров\n- максимум товаров с кешбэком 100%\n- указан статус продавца (стоит ли доверять)\n- розыгрыш товаров 2 раза в месяц', 
                  'price': 20000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['premium_subscription']},
 
             ]
@@ -78,10 +74,14 @@ class SubscriptionService:
                               'price': 6900, 'duration_days': 5 / (24 * 60), 'channel_id': CHANNEL_IDS['basic_subscription']})
             
             for plan_data in plans:
+                # Убедимся, что цена - целое число
+                if not isinstance(plan_data['price'], int):
+                    plan_data['price'] = int(plan_data['price'])
                 plan = SubscriptionPlan(**plan_data)
                 session.add(plan)
             
             await session.commit()
+            logging.info(f"Инициализированы планы подписки: {len(plans)} планов")
     
     async def get_user_by_telegram_id(self, telegram_user_id):
         """Получение пользователя по Telegram ID или создание нового"""
@@ -130,14 +130,23 @@ class SubscriptionService:
                     user = result.scalar_one_or_none()
                     if not user:
                         raise ValueError(f"Пользователь с Telegram ID {user_id} не найден")
-                    invite_link = await self.bot.create_chat_invite_link(
+                    # Находим активную подписку пользователя
+                    sub_result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id, UserSubscription.is_active == True))
+                    subscription = sub_result.scalar_one_or_none()
+                    if not subscription:
+                        raise ValueError(f"Активная подписка для пользователя {user_id} не найдена")
+                    invite_link_obj = await self.bot.create_chat_invite_link(
                         chat_id=channel_id,
                         name=f"Subscription_{user.telegram_user_id}",
                         creates_join_request=True,
-                        expire_date=datetime.now() + timedelta(days=7)
+                        expire_date=datetime.now() + timedelta(days=7),
+                        member_limit=1  # ссылка одноразовая
                     )
-                    INVITE_LINKS_MAP[invite_link.invite_link] = str(user.telegram_user_id)
-                    return invite_link.invite_link
+                    # Сохраняем ссылку в подписке
+                    subscription.invite_link = invite_link_obj.invite_link
+                    session.add(subscription)
+                    await session.commit()
+                    return invite_link_obj.invite_link
             except Exception as e:
                 logging.error(f"Ошибка при создании ссылки-приглашения (попытка {attempt+1}): {str(e)}")
                 if attempt < max_retries - 1:
@@ -166,50 +175,74 @@ class SubscriptionService:
         except Exception as e:
             return False
     
-    def is_valid_join_request(self, invite_link, user_id):
-        """Проверяет, валиден ли запрос на вступление от данного пользователя"""
-        if invite_link not in INVITE_LINKS_MAP:
-            return False
-        
-        expected_user_id = INVITE_LINKS_MAP.get(invite_link)
-        return str(user_id) == expected_user_id
+    async def is_valid_join_request(self, invite_link, user_id):
+        """Проверяет, валиден ли запрос на вступление от данного пользователя через базу"""
+        async with self.async_session_maker() as session:
+            result = await session.execute(
+                select(UserSubscription).where(
+                    UserSubscription.invite_link == invite_link,
+                    UserSubscription.is_active == True,
+                    UserSubscription.end_date > datetime.utcnow()
+                )
+            )
+            sub = result.scalar_one_or_none()
+            if not sub:
+                return False
+            user_result = await session.execute(select(User).where(User.id == sub.user_id))
+            user = user_result.scalar_one_or_none()
+            return user and str(user.telegram_user_id) == str(user_id)
     
-    async def create_subscription(self, telegram_user_id, subscription_type, duration):
-        """Создание подписки для пользователя"""
-        # Получаем или создаем пользователя
-        user = await self.get_user_by_telegram_id(telegram_user_id)
-        
-        # Получаем подходящий план
-        plan = await self.get_subscription_plan(subscription_type, duration)
-        
-        # Деактивируем существующие активные подписки
+    async def create_subscription(self, telegram_user_id, subscription_type=None, duration=None, plan_id=None):
+        """Создание подписки для пользователя с полной транзакционностью"""
         async with self.async_session_maker() as session:
-            result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
-            active_subscriptions = result.scalars().all()
-            for subscription in active_subscriptions:
-                subscription.is_active = False
-        
-        # Создаем новую подписку
-        async with self.async_session_maker() as session:
-            subscription = await SubscriptionManager(session).subscribe_user(user.id, plan.id)
-            subscription.reminder_sent = False
-        
-        # Создаем ссылку-приглашение в канал, если есть ID канала
-        if plan.channel_id and self.bot:
-            try:
-                invite_link = await self.create_channel_invite(plan.channel_id, user.telegram_user_id)
-                async with self.async_session_maker() as session:
-                    result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
-                    active_subscriptions = result.scalars().all()
-                    for subscription in active_subscriptions:
-                        subscription.invite_link = invite_link
-                        session.add(subscription)
-                        session.commit()
-            except Exception as e:
-                # Логируем ошибку, но не прерываем создание подписки
-                logging.error(f"Ошибка при создании ссылки-приглашения: {str(e)}")
-        
-        return subscription
+            async with session.begin():
+                # Получаем или создаем пользователя
+                result = await session.execute(select(User).where(User.telegram_user_id == str(telegram_user_id)))
+                user = result.scalar_one_or_none()
+                if not user:
+                    user = User(telegram_user_id=str(telegram_user_id), is_active=True)
+                    session.add(user)
+                    await session.flush()
+                # Получаем план подписки
+                if plan_id is not None:
+                    # Новый способ - по plan_id
+                    result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+                    plan = result.scalar_one_or_none()
+                    if not plan:
+                        raise ValueError(f"План подписки с ID {plan_id} не найден")
+                elif subscription_type and duration:
+                    # Старый способ - по типу и длительности
+                    plan = await self.get_subscription_plan(subscription_type, duration)
+                else:
+                    raise ValueError("Необходимо указать либо plan_id, либо оба параметра subscription_type и duration")
+                # Деактивируем существующие активные подписки
+                result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
+                active_subscriptions = result.scalars().all()
+                for subscription in active_subscriptions:
+                    subscription.is_active = False
+                    session.add(subscription)
+                
+                # Создаем новую подписку
+                subscription = await SubscriptionManager(session).subscribe_user(user.id, plan.id, reminder_sent=False, commit=False)
+                
+                # Генерируем ссылку и сохраняем её
+                if plan.channel_id and self.bot:
+                    try:
+                        invite_link_obj = await self.bot.create_chat_invite_link(
+                            chat_id=plan.channel_id,
+                            name=f"Subscription_{user.telegram_user_id}",
+                            creates_join_request=True,
+                            expire_date=datetime.now() + timedelta(days=7),
+                            member_limit=1  # ссылка одноразовая
+                        )
+                        subscription.invite_link = invite_link_obj.invite_link
+                    except Exception as e:
+                        logging.error(f"Ошибка при создании ссылки-приглашения: {str(e)}")
+                        raise
+                session.add(subscription)
+                await session.flush()
+                subscription_id = subscription.id
+            return subscription_id
     
     async def get_subscription_info(self, telegram_user_id):
         """Получение информации о текущей подписке пользователя"""
@@ -217,9 +250,9 @@ class SubscriptionService:
         # Проверяем и обновляем истекшие подписки
         async with self.async_session_maker() as session:
             await SubscriptionManager(session).check_subscription_expiration()
-        # Получаем активную подписку
+        # Получаем только активную подписку
         async with self.async_session_maker() as session:
-            result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
+            result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id, UserSubscription.is_active == True))
             subscriptions = result.scalars().all()
         if not subscriptions:
             return None
@@ -242,43 +275,52 @@ class SubscriptionService:
     async def remove_user_access(self, subscription: UserSubscription, max_retries=3):
         """
         Удаляет пользователя из канала, отзывает ссылку-приглашение, помечает подписку как неактивную и очищает ссылку в базе.
+        Все действия выполняются в одной транзакции.
+        Теперь подписка всегда деактивируется, даже если возникла ошибка при удалении пользователя из канала.
         """
         if not self.bot:
             logging.error("Бот не установлен в сервисе подписок")
             return False
         async with self.async_session_maker() as session:
-            result = await session.execute(select(User).where(User.id == int(subscription.user_id)))
-            user = result.scalar_one_or_none()
-            if not user:
-                logging.error(f"Не найден пользователь для подписки {subscription.id}")
-                return False
-            for attempt in range(max_retries):
-                try:
-                    await self.bot.ban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id)
-                    await self.bot.unban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id, only_if_banned=True)
-                    break
-                except Exception as e:
-                    logging.error(f"Ошибка при удалении пользователя (попытка {attempt+1}): {e}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                    else:
-                        return False
-            if subscription.invite_link:
+            async with session.begin():
+                result = await session.execute(select(User).where(User.id == int(subscription.user_id)))
+                user = result.scalar_one_or_none()
+                if not user:
+                    logging.error(f"Не найден пользователь для подписки {subscription.id}")
+                    return False
+                # Пытаемся удалить пользователя из канала
+                removed = False
                 for attempt in range(max_retries):
                     try:
-                        await self.bot.revoke_chat_invite_link(chat_id=subscription.channel_id, invite_link=subscription.invite_link)
+                        await self.bot.ban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id)
+                        await self.bot.unban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id, only_if_banned=True)
+                        removed = True
                         break
                     except Exception as e:
-                        logging.error(f"Ошибка при отзыве ссылки (попытка {attempt+1}): {e}")
+                        if 'USER_NOT_PARTICIPANT' in str(e) or 'user not found' in str(e).lower() or 'chat not found' in str(e).lower():
+                            logging.info(f"[REMOVE] Пользователь {user.telegram_user_id} уже не состоит в канале {subscription.channel_id} или канал не найден.")
+                            break
+                        logging.error(f"Ошибка при удалении пользователя (попытка {attempt+1}): {e}")
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                        else:
-                            pass
-            subscription.is_active = False
-            subscription.invite_link = None
-            session.add(subscription)
-            await session.commit()
-        return True
+                # Пытаемся отозвать ссылку
+                if subscription.invite_link:
+                    for attempt in range(max_retries):
+                        try:
+                            await self.bot.revoke_chat_invite_link(chat_id=subscription.channel_id, invite_link=subscription.invite_link)
+                            break
+                        except Exception as e:
+                            if 'INVITE_HASH_EXPIRED' in str(e) or 'not found' in str(e).lower():
+                                logging.info(f"[REMOVE] Ссылка уже неактивна или не найдена: {subscription.invite_link}")
+                                break
+                            logging.error(f"Ошибка при отзыве ссылки (попытка {attempt+1}): {e}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                # ВСЕГДА деактивируем подписку и очищаем invite_link
+                subscription.is_active = False
+                subscription.invite_link = None
+                session.add(subscription)
+            return True
 
     async def get_expiring_subscriptions(self, hours=24):
         """
