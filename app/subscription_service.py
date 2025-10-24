@@ -70,8 +70,8 @@ class SubscriptionService:
             ]
             
             if PAYMENT_TEST_MODE:
-                plans.append({'name': 'Базовый 5 минут', 'description': 'Тестовая подписка на 5 минут',
-                              'price': 6900, 'duration_days': 5 / (24 * 60), 'channel_id': CHANNEL_IDS['basic_subscription']})
+                plans.append({'name': 'Доступ в канал', 'description': 'Доступ в канал Ivanoff о бизнесе',
+                              'price': 75000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['basic_subscription']})
             
             for plan_data in plans:
                 # Убедимся, что цена - целое число
@@ -139,8 +139,7 @@ class SubscriptionService:
                         chat_id=channel_id,
                         name=f"Subscription_{user.telegram_user_id}",
                         creates_join_request=True,
-                        expire_date=datetime.now() + timedelta(days=7),
-                        member_limit=1  # ссылка одноразовая
+                        expire_date=datetime.now() + timedelta(days=7)
                     )
                     # Сохраняем ссылку в подписке
                     subscription.invite_link = invite_link_obj.invite_link
@@ -232,8 +231,7 @@ class SubscriptionService:
                             chat_id=plan.channel_id,
                             name=f"Subscription_{user.telegram_user_id}",
                             creates_join_request=True,
-                            expire_date=datetime.now() + timedelta(days=7),
-                            member_limit=1  # ссылка одноразовая
+                            expire_date=datetime.now() + timedelta(days=7)
                         )
                         subscription.invite_link = invite_link_obj.invite_link
                     except Exception as e:

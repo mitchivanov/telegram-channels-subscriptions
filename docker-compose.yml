@@ -3,7 +3,7 @@ version: '3.8'
 services:
   bot:
     build: .
-    command: python main.py
+    command: python -m app.main
     env_file:
       - ./app/.env
     depends_on:
@@ -19,7 +19,7 @@ services:
 
   celery:
     build: .
-    command: celery -A celery_app.celery worker --loglevel=info
+    command: celery -A app.celery_app.celery worker --loglevel=info
     env_file:
       - ./app/.env
     depends_on:
@@ -35,7 +35,7 @@ services:
 
   celery-beat:
     build: .
-    command: celery -A celery_app.celery beat --loglevel=info
+    command: celery -A app.celery_app.celery beat --loglevel=info
     env_file:
       - ./app/.env
     depends_on:
