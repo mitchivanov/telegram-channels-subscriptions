@@ -290,10 +290,10 @@ async def cancel_payment(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer('Оплата отменена. Вы можете вернуться в главное меню', reply_markup=await get_reply_keyboard(keyboard_type='start'))
 
-@dp.callback_query(F.data == 'back_to_start')
-async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer('Вы вернулись в главное меню', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+# @dp.callback_query(F.data == 'back_to_start')
+# async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
+#     await state.clear()
+#     await callback.message.answer('Вы вернулись в главное меню', reply_markup=await get_reply_keyboard(keyboard_type='start'))
 
 @dp.callback_query(F.data == 'cancel_subscription')
 async def cancel_subscription_request(callback: types.CallbackQuery, state: FSMContext):

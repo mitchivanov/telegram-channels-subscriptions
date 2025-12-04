@@ -20,8 +20,8 @@ async def get_inline_keyboard(keyboard_type: str):
         case 'manage_subscription':
             inline_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text='Оплатить подписку', callback_data='buy_subscription'),
-                     InlineKeyboardButton(text='Вернуться назад', callback_data='back_to_start')]
+                    [InlineKeyboardButton(text='Оплатить подписку', callback_data='buy_subscription')],
+                    #[InlineKeyboardButton(text='Вернуться назад', callback_data='back_to_start')]
                 ]
             )
             
@@ -31,7 +31,7 @@ async def get_inline_keyboard(keyboard_type: str):
                     [InlineKeyboardButton(text='Продлить подписку', callback_data='extend_subscription')],
                     #[InlineKeyboardButton(text='Сменить тариф', callback_data='change_subscription')],
                     [InlineKeyboardButton(text='Отменить подписку', callback_data='cancel_subscription')],
-                    [InlineKeyboardButton(text='Вернуться назад', callback_data='back_to_start')]
+                    # [InlineKeyboardButton(text='Вернуться назад', callback_data='back_to_start')]
                 ]
             )
             
@@ -62,7 +62,7 @@ async def get_inline_keyboard(keyboard_type: str):
             inline_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text='Подтвердить отмену', callback_data='confirm_cancel_subscription')],
-                    [InlineKeyboardButton(text='Отмена', callback_data='back_to_start')]
+                    # [InlineKeyboardButton(text='Отмена', callback_data='back_to_start')]
                 ]
             )
             
