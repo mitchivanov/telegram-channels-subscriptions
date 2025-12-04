@@ -64,7 +64,7 @@ async def start_command(message: types.Message, state: FSMContext):
     text1 = WELCOME_TEXT
     text2 = "🔥Доступ к каналу с товарами за 200₽ в месяц"
     
-    await message.answer(text1, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    await message.answer(text1, parse_mode='HTML', reply_markup=await get_reply_keyboard(keyboard_type='start'))
     premium_keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buy_subscription')]

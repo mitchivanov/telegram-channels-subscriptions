@@ -107,7 +107,7 @@ class SubscriptionService:
     
     
     async def get_default_month_plan(self):
-        async with self.async_session_maker as session:
+        async with self.async_session_maker() as session:
             result = await session.execute(
                 select(SubscriptionPlan).where(
                     SubscriptionPlan.price == 20000,  # 200 ₽ * 100
