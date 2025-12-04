@@ -20,6 +20,9 @@ from sqlalchemy import select
 from app.subscription_service import SubscriptionManager
 import json
 
+from entry_text import WELCOME_TEXT
+
+
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -36,7 +39,7 @@ if IS_TEST_MODE and not TELEGRAM_PAYMENT_TOKEN.startswith('381764678:TEST:'):
 
 # Создаем класс состояний для хранения выбора пользователя
 class SubscriptionStates(StatesGroup):
-    choosing_type = State()
+    #choosing_type = State()
     confirming_payment = State()
 
 
@@ -58,12 +61,16 @@ async def start_command(message: types.Message, state: FSMContext):
     # При старте сбрасываем состояние
     await state.clear()
     first_name = message.from_user.first_name or ''
-    text = (
-        f"Здравствуйте, {first_name}!\n"
-        f"Этот бот предоставляет подписку на телеграм-каналы с кэшбеком на WB.\n"
-        f"Для информации о тарифных планах нажмите кнопку \"Управление подпиской\" внизу."
+    text1 = WELCOME_TEXT
+    text2 = "🔥Доступ к каналу с товарами за 200₽ в месяц"
+    
+    await message.answer(text1, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    premium_keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buysubscription')]
+        ]
     )
-    await message.answer(text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    await message.answer(text2, reply_markup=premium_keyboard)
 
 @dp.message(F.text == 'Управление подпиской')
 async def manage_subscription(message: types.Message, state: FSMContext):
@@ -164,22 +171,26 @@ async def process_join_request(join_request: ChatJoinRequest):
 @dp.callback_query(F.data == 'buy_subscription')
 async def buy_subscription(callback: types.CallbackQuery, state: FSMContext):
     # Переходим в состояние выбора типа подписки
-    await state.set_state(SubscriptionStates.choosing_type)
+    # await state.set_state(SubscriptionStates.choosing_type)
     # Получаем все тарифы из базы
-    async with subscription_service.async_session_maker() as session:
-        result = await session.execute(select(SubscriptionPlan))
-        plans = result.scalars().all()
+    # async with subscription_service.async_session_maker() as session:
+    #     result = await session.execute(select(SubscriptionPlan))
+    #     plans = result.scalars().all()
     # Формируем клавиатуру с вариантами тарифов
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
-            for plan in plans
-        ]
-    )
-    try:
-        await callback.message.edit_text('Выберите тип подписки:', reply_markup=keyboard)
-    except Exception as e:
-        await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
+    plan = await subscription_service.get_default_month_plan()
+    
+    # keyboard = types.InlineKeyboardMarkup(
+    #     inline_keyboard=[
+    #         [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
+    #         for plan in plans
+    #     ]
+    # )
+    # try:
+    #     await callback.message.edit_text('Выберите тип подписки:', reply_markup=keyboard)
+    # except Exception as e:
+    #     await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
+    
+    await send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False)
 
 async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False):
     preview_text = (
