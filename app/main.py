@@ -109,7 +109,6 @@ async def help_command(message: types.Message, state: FSMContext):
     await message.answer(text1, parse_mode='HTML',
                          #reply_markup=await get_reply_keyboard(keyboard_type='start')
                         )
-    await message.answer(text1)
 
 
 # Обработчик запросов на вступление в канал
