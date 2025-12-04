@@ -193,21 +193,21 @@ async def buy_subscription(callback: types.CallbackQuery, state: FSMContext):
     await send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False)
 
 async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False):
-    preview_text = (
-        f"Вы выбрали {'продление подписки' if is_extension else 'подписку'}: {plan.name}\n"
-        f"Описание: {plan.description or '-'}\n"
-        f"Длительность: {plan.duration_days} дней\n"
-        f"Стоимость: {plan.price/100:.2f} руб.\n\n"
-        f"Нажмите кнопку ниже для оплаты:"
-    )
-    try:
-        if edit:
-            await callback.message.edit_text(preview_text)
-        else:
-            await callback.message.answer(preview_text)
-    except Exception as e:
-        logging.error(f"Ошибка при отправке превью подписки: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
-        await callback.message.answer(preview_text)
+    # preview_text = (
+    #     f"Вы выбрали {'продление подписки' if is_extension else 'подписку'}: {plan.name}\n"
+    #     f"Описание: {plan.description or '-'}\n"
+    #     f"Длительность: {plan.duration_days} дней\n"
+    #     f"Стоимость: {plan.price/100:.2f} руб.\n\n"
+    #     f"Нажмите кнопку ниже для оплаты:"
+    # )
+    # try:
+    #     if edit:
+    #         await callback.message.edit_text(preview_text)
+    #     else:
+    #         await callback.message.answer(preview_text)
+    # except Exception as e:
+    #     logging.error(f"Ошибка при отправке превью подписки: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+    #     await callback.message.answer(preview_text)
     try:
         # Подготавливаем данные для чека (provider_data)
         provider_data = {
