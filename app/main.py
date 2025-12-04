@@ -67,7 +67,7 @@ async def start_command(message: types.Message, state: FSMContext):
     await message.answer(text1, reply_markup=await get_reply_keyboard(keyboard_type='start'))
     premium_keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buysubscription')]
+            [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buy_subscription')]
         ]
     )
     await message.answer(text2, reply_markup=premium_keyboard)
@@ -271,19 +271,19 @@ async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=
         )
         await state.clear()
 
-@dp.callback_query(SubscriptionStates.choosing_type, lambda c: c.data.startswith('plan_'))
-async def process_subscription_plan(callback: types.CallbackQuery, state: FSMContext):
-    plan_id = int(callback.data.replace('plan_', ''))
-    # Получаем тариф из базы
-    async with subscription_service.async_session_maker() as session:
-        result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
-        plan = result.scalar_one_or_none()
-    if not plan:
-        await callback.message.answer('Ошибка: выбранный тариф не найден.')
-        return
-    await state.update_data(plan_id=plan_id)
-    # Показываем превью и инвойс
-    await send_invoice_for_plan(callback, state, plan, edit=True)
+# @dp.callback_query(SubscriptionStates.choosing_type, lambda c: c.data.startswith('plan_'))
+# async def process_subscription_plan(callback: types.CallbackQuery, state: FSMContext):
+#     plan_id = int(callback.data.replace('plan_', ''))
+#     # Получаем тариф из базы
+#     async with subscription_service.async_session_maker() as session:
+#         result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+#         plan = result.scalar_one_or_none()
+#     if not plan:
+#         await callback.message.answer('Ошибка: выбранный тариф не найден.')
+#         return
+#     await state.update_data(plan_id=plan_id)
+#     # Показываем превью и инвойс
+#     await send_invoice_for_plan(callback, state, plan, edit=True)
 
 @dp.callback_query(F.data == 'cancel_payment')
 async def cancel_payment(callback: types.CallbackQuery, state: FSMContext):
@@ -622,33 +622,33 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
         await state.clear()
 
 # Добавляем обработчик для кнопки "Назад к выбору тарифа"
-@dp.callback_query(F.data == 'back_to_plan_selection')
-async def back_to_plan_selection(callback: types.CallbackQuery, state: FSMContext):
-    # Получаем id сообщений для удаления
-    data = await state.get_data()
-    preview_msg_id = data.get('preview_msg_id')
-    invoice_msg_id = data.get('invoice_msg_id')
-    # Удаляем оба сообщения, если они есть
-    try:
-        if invoice_msg_id:
-            await callback.bot.delete_message(callback.message.chat.id, invoice_msg_id)
-        if preview_msg_id:
-            await callback.bot.delete_message(callback.message.chat.id, preview_msg_id)
-    except Exception as e:
-        logging.error(f"[BACK] Ошибка при удалении сообщений: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
-    # Переходим обратно к выбору тарифа
-    await state.set_state(SubscriptionStates.choosing_type)
-    async with subscription_service.async_session_maker() as session:
-        result = await session.execute(select(SubscriptionPlan))
-        plans = result.scalars().all()
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
-            for plan in plans
-        ]
-    )
-    await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
-    await callback.answer()
+# @dp.callback_query(F.data == 'back_to_plan_selection')
+# async def back_to_plan_selection(callback: types.CallbackQuery, state: FSMContext):
+#     # Получаем id сообщений для удаления
+#     data = await state.get_data()
+#     preview_msg_id = data.get('preview_msg_id')
+#     invoice_msg_id = data.get('invoice_msg_id')
+#     # Удаляем оба сообщения, если они есть
+#     try:
+#         if invoice_msg_id:
+#             await callback.bot.delete_message(callback.message.chat.id, invoice_msg_id)
+#         if preview_msg_id:
+#             await callback.bot.delete_message(callback.message.chat.id, preview_msg_id)
+#     except Exception as e:
+#         logging.error(f"[BACK] Ошибка при удалении сообщений: {str(e)}\nTRACEBACK: {traceback.format_exc()}")
+#     # Переходим обратно к выбору тарифа
+#     #await state.set_state(SubscriptionStates.choosing_type)
+#     async with subscription_service.async_session_maker() as session:
+#         result = await session.execute(select(SubscriptionPlan))
+#         plans = result.scalars().all()
+#     keyboard = types.InlineKeyboardMarkup(
+#         inline_keyboard=[
+#             [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
+#             for plan in plans
+#         ]
+#     )
+#     await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
+#     await callback.answer()
 
 # Admin commands
 @dp.message(Command('payment_errors'), lambda msg: str(msg.from_user.id) in ADMIN_USER_IDS)

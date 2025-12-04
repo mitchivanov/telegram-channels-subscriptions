@@ -70,7 +70,7 @@ class SubscriptionService:
                 # Премиум планы
                 {
                     'name': 'Premium кешбэк',
-                    'description': '',
+                    'description': 'Доступ к каналу',
                     'price': 20000,
                     'duration_days': 30,
                     'channel_id': CHANNEL_IDS['premium_subscription']},
@@ -107,7 +107,7 @@ class SubscriptionService:
     
     
     async def get_default_month_plan(self):
-        async with self.asyncsessionmaker as session:
+        async with self.async_session_maker as session:
             result = await session.execute(
                 select(SubscriptionPlan).where(
                     SubscriptionPlan.price == 20000,  # 200 ₽ * 100
