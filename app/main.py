@@ -3,7 +3,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram import Router, types, F
 from aiogram.filters import Command
 import os
-from keyboards import get_reply_keyboard, get_inline_keyboard
+from keyboards import get_inline_keyboard
 import logging
 from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
