@@ -1,18 +1,18 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 
-async def get_reply_keyboard(keyboard_type: str):
-    match keyboard_type:
-        case 'start':
-            reply_keyboard = ReplyKeyboardMarkup(
-                keyboard=[
-                    [KeyboardButton(text='Управление подпиской')]
-                ],
-                resize_keyboard=True
-            )
-        case _:
-            raise ValueError(f"Неизвестный тип клавиатуры: {keyboard_type}")
-    return reply_keyboard
+# async def get_reply_keyboard(keyboard_type: str):
+#     match keyboard_type:
+#         case 'start':
+#             reply_keyboard = ReplyKeyboardMarkup(
+#                 keyboard=[
+#                     [KeyboardButton(text='Управление подпиской')]
+#                 ],
+#                 resize_keyboard=True
+#             )
+#         case _:
+#             raise ValueError(f"Неизвестный тип клавиатуры: {keyboard_type}")
+#     return reply_keyboard
 
 
 async def get_inline_keyboard(keyboard_type: str):

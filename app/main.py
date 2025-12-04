@@ -64,7 +64,9 @@ async def start_command(message: types.Message, state: FSMContext):
     text1 = WELCOME_TEXT
     text2 = "🔥Доступ к каналу с товарами за 200₽ в месяц"
     
-    await message.answer(text1, parse_mode='HTML', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    await message.answer(text1, parse_mode='HTML',
+                         #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                        )
     premium_keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buy_subscription')]
@@ -72,7 +74,7 @@ async def start_command(message: types.Message, state: FSMContext):
     )
     await message.answer(text2, reply_markup=premium_keyboard)
 
-@dp.message(F.text == 'Управление подпиской')
+@dp.message(Command('subscription'))
 async def manage_subscription(message: types.Message, state: FSMContext):
     # Проверяем, есть ли активная подписка у пользователя
     subscription_info = await subscription_service.get_subscription_info(message.from_user.id)
@@ -95,6 +97,19 @@ async def manage_subscription(message: types.Message, state: FSMContext):
     else:
         # Если подписки нет, предлагаем купить
         await message.answer('Выберите действие:', reply_markup=await get_inline_keyboard(keyboard_type='manage_subscription'))
+
+
+@dp.message(Command('help'))
+async def help_command(message: types.Message, state: FSMContext):
+    first_name = message.from_user.first_name or ''
+    text1 = '''🤝 Поддержка
+
+Если у вас есть вопрос - напишите мне @mariidori
+'''   
+    await message.answer(text1, parse_mode='HTML',
+                         #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                        )
+    await message.answer(text1)
 
 
 # Обработчик запросов на вступление в канал
@@ -267,7 +282,7 @@ async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=
         logging.error(f"[INVOICE][ERROR] Параметры платежа при ошибке: chat_id={callback.from_user.id}, title={plan.name}, description=Оплата доступа к тарифу {plan.name}, продолжительность - {plan.duration_days} дней, payload=plan_{plan.id}, provider_token={TELEGRAM_PAYMENT_TOKEN}, currency=RUB, price={plan.price}, need_email=True, send_email_to_provider=True")
         await callback.message.answer(
             f"Произошла ошибка при создании платежа: {str(e)}",
-            reply_markup=await get_reply_keyboard(keyboard_type='start')
+            # reply_markup=await get_reply_keyboard(keyboard_type='start')
         )
         await state.clear()
 
@@ -288,7 +303,9 @@ async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=
 @dp.callback_query(F.data == 'cancel_payment')
 async def cancel_payment(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.answer('Оплата отменена. Вы можете вернуться в главное меню', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+    await callback.message.answer('Оплата отменена. Вы можете вернуться в главное меню',
+                                  #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                                  )
 
 # @dp.callback_query(F.data == 'back_to_start')
 # async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
@@ -313,14 +330,20 @@ async def extend_subscription(callback: types.CallbackQuery, state: FSMContext):
         result = await session.execute(select(UserSubscription).where(UserSubscription.user_id == user.id, UserSubscription.is_active == True))
         active_subs = result.scalars().all()
     if not active_subs:
-        await callback.message.answer('У вас нет активной подписки для продления.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'У вас нет активной подписки для продления.',
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
         return
     subscription = active_subs[0]
     async with subscription_service.async_session_maker() as session:
         result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == subscription.plan_id))
         plan = result.scalar_one_or_none()
     if not plan:
-        await callback.message.answer('Ошибка: тариф не найден.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'Ошибка: тариф не найден.',
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
         return
     
     # Сохраняем информацию о текущей подписке в состоянии для использования после оплаты
@@ -343,7 +366,10 @@ async def confirm_cancel_subscription(callback: types.CallbackQuery, state: FSMC
         active_subs = result.scalars().all()
     if not active_subs:
         logging.warning(f"[CANCEL] Нет активной подписки для пользователя {user_id}")
-        await callback.message.answer('У вас нет активной подписки для отмены.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'У вас нет активной подписки для отмены.',
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
         return
     subscription = active_subs[0]
     
@@ -354,7 +380,10 @@ async def confirm_cancel_subscription(callback: types.CallbackQuery, state: FSMC
     
     if not plan:
         logging.error(f"[CANCEL] Не найден тариф для подписки {subscription.id}")
-        await callback.message.answer('Ошибка: не удалось найти тариф для вашей подписки.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'Ошибка: не удалось найти тариф для вашей подписки.',
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
         return
     
     # Устанавливаем channel_id из плана в подписку для метода remove_user_access
@@ -371,9 +400,15 @@ async def confirm_cancel_subscription(callback: types.CallbackQuery, state: FSMC
         logging.info(f"[CANCEL] Статус подписки после отмены: is_active={getattr(updated_sub, 'is_active', None)}, invite_link={getattr(updated_sub, 'invite_link', None)}")
     
     if success:
-        await callback.message.answer('Ваша подписка отменена. Доступ к каналу отозван. Деньги за неиспользованный период не возвращаются.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'Ваша подписка отменена. Доступ к каналу отозван. Деньги за неиспользованный период не возвращаются.', 
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
     else:
-        await callback.message.answer('Произошла ошибка при отмене подписки. Пожалуйста, попробуйте позже или обратитесь в поддержку.', reply_markup=await get_reply_keyboard(keyboard_type='start'))
+        await callback.message.answer(
+            'Произошла ошибка при отмене подписки. Пожалуйста, попробуйте позже или обратитесь в поддержку.',
+            #reply_markup=await get_reply_keyboard(keyboard_type='start')
+            )
     
     await callback.answer()
 
@@ -452,7 +487,10 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                 if hasattr(subscription, 'invite_link') and subscription.invite_link:
                     response_text += f"Ссылка для входа в канал: {subscription.invite_link}\n"
                     response_text += "⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. Ваш запрос будет автоматически одобрен."
-                await message.answer(response_text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                await message.answer(
+                    response_text,
+                    #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                    )
                 logging.info(f"[PAYMENT] Подписка успешно создана для пользователя {message.from_user.id}, план {plan_id}, charge_id={provider_payment_charge_id}")
                 # Логируем содержимое подписки из базы
                 logging.info(f"[PAYMENT] Итоговое состояние подписки в базе: {subscription}")
@@ -491,8 +529,10 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                 }
                 logging.critical(f"[PAYMENT][EMERGENCY] Данные платежа для ручного восстановления: {emergency_info}")
                 
-                await message.answer("⚠️ Платеж выполнен, но возникла техническая ошибка при активации подписки. Наши специалисты уже работают над этим и восстановят ваш доступ в ближайшее время. Пожалуйста, сохраните этот чат для подтверждения оплаты.", 
-                                   reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                await message.answer(
+                    "⚠️ Платеж выполнен, но возникла техническая ошибка при активации подписки. Наши специалисты уже работают над этим и восстановят ваш доступ в ближайшее время. Пожалуйста, сохраните этот чат для подтверждения оплаты.", 
+                    #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                    )
         
         elif payload.startswith('extend_'):
             # Продление существующей подписки
@@ -556,7 +596,10 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                     response_text += f"Ваша новая ссылка для входа в канал: {invite_link}\n"
                     response_text += "⚠️ Перейдя по ссылке, нажмите 'Запросить вступление'. Ваш запрос будет автоматически одобрен."
                 
-                await message.answer(response_text, reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                await message.answer(
+                    response_text,
+                    #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                    )
                 logging.info(f"[PAYMENT][EXTEND] Подписка успешно продлена для пользователя {message.from_user.id}, ID={subscription.id}, план {plan_id}")
             
             except Exception as e:
@@ -584,12 +627,14 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                     logging.critical(f"[PAYMENT][EXTEND][DB_ERROR] Не удалось сохранить информацию об ошибке в БД: {str(db_error)}")
                 
                 await message.answer("⚠️ Платеж выполнен, но возникла техническая ошибка при продлении подписки. Наши специалисты уже работают над этим и скоро восстановят ваш доступ.", 
-                                   reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                                   #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                                   )
         
         else:
             logging.error(f"[PAYMENT][ERROR] Некорректный формат payload после оплаты: {payload}")
             await message.answer("Произошла ошибка при обработке платежа. Пожалуйста, обратитесь в поддержку.", 
-                               reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                               #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                               )
             return
             
     except Exception as e:
@@ -617,7 +662,8 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
             logging.critical(f"[PAYMENT][DB_ERROR] Не удалось сохранить информацию об общей ошибке в базу данных: {str(db_error)}")
         
         await message.answer("Произошла ошибка при обработке платежа. Пожалуйста, обратитесь в поддержку.", 
-                           reply_markup=await get_reply_keyboard(keyboard_type='start'))
+                           #reply_markup=await get_reply_keyboard(keyboard_type='start')
+                           )
     finally:
         await state.clear()
 
