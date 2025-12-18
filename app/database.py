@@ -29,10 +29,12 @@ class User(Base):
     __tablename__ = 'users'
     
     id = Column(Integer, primary_key=True)
+    first_name = Column(String, nullable=True)  # Имя пользователя
     telegram_user_id = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
     email = Column(String, nullable=True)  # Поле для хранения электронной почты пользователя
-    
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)  # Время регистрации
+    first_start_reminder_sent = Column(Boolean, default=False)  # Отправлено ли напоминание о регистрации
     # Отношение с подписками пользователя
     subscriptions = relationship("UserSubscription", back_populates="user")
     
@@ -51,6 +53,8 @@ class UserSubscription(Base):
     is_active = Column(Boolean, default=True)
     invite_link = Column(String)  # Ссылка-приглашение в канал
     reminder_sent = Column(Boolean, default=False)  # Было ли отправлено напоминание о скором окончании
+    last_day_reminder_sent = Column(Boolean, default=False)  # Напоминание в последний день
+    expired_reminder_sent = Column(Boolean, default=False)  # Напоминание после истечения
     provider_payment_charge_id = Column(String, nullable=True)  # ID транзакции у платежного провайдера
     
     # Отношения

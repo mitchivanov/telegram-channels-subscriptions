@@ -58,14 +58,22 @@ class SubscriptionService:
             
             # Базовый план на разные сроки
             plans = [
-                # Базовые планы
-                {'name': 'Умная экономия', 'description': '- товары с кешбэком до 90%\n- выбор категорий товаров\n- более 20 товаров с кешбэком 100% ежемесячно\n- ежемесячный розыгрыш товаров', 
-                 'price': 10000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['basic_subscription']},
+                # # Базовые планы
+                # {
+                #     'name': 'Умная экономия',
+                #     'description': '- товары с кешбэком до 90%\n- выбор категорий товаров\n- более 20 товаров с кешбэком 100% ежемесячно\n- ежемесячный розыгрыш товаров',
+                #     'price': 10000,
+                #     'duration_days': 30,
+                #     'channel_id': CHANNEL_IDS['basic_subscription']},
 
                 
                 # Премиум планы
-                {'name': 'Premium кешбэк', 'description': '- товары с кешбэком от 90%\n- выбор категорий товаров\n- максимум товаров с кешбэком 100%\n- указан статус продавца (стоит ли доверять)\n- розыгрыш товаров 2 раза в месяц', 
-                 'price': 20000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['premium_subscription']},
+                {
+                    'name': 'Premium кешбэк',
+                    'description': 'Доступ к каналу',
+                    'price': 20000,
+                    'duration_days': 30,
+                    'channel_id': CHANNEL_IDS['premium_subscription']},
 
             ]
             
@@ -96,6 +104,21 @@ class SubscriptionService:
                 await session.commit()
             
             return user
+    
+    
+    async def get_default_month_plan(self):
+        async with self.async_session_maker() as session:
+            result = await session.execute(
+                select(SubscriptionPlan).where(
+                    SubscriptionPlan.price == 20000,  # 200 ₽ * 100
+                    SubscriptionPlan.duration_days == 30
+                )
+            )
+            plan = result.scalar_one_or_none()
+            if not plan:
+                raise ValueError("Не найден план на 30 дней за 200₽")
+            return plan
+    
     
     async def get_subscription_plan(self, subscription_type, duration):
         """Получение подходящего плана подписки по типу и длительности"""
