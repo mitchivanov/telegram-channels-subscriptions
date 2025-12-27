@@ -109,6 +109,42 @@ async def manage_subscription(message: types.Message, state: FSMContext):
         # Если подписки нет, предлагаем купить
         await message.answer('Выберите действие:', reply_markup=await get_inline_keyboard(keyboard_type='manage_subscription'))
 
+@dp.message(Command('details'))
+async def details_command(message: types.Message):
+    """
+    Показывает дату окончания подписки и прямую ссылку на канал.
+    Ссылка формируется динамически на основе купленного плана.
+    """
+    # 1. Получаем данные о подписке (включая ID канала из плана)
+    subscription_info = await subscription_service.get_subscription_info(message.from_user.id)
+
+    if subscription_info and subscription_info['is_active']:
+        # Форматируем дату
+        end_date = subscription_info['end_date'].strftime('%d.%m.%Y')
+        
+        # Получаем ID канала из подписки (он берется из базы, куда попал из .env)
+        raw_channel_id = str(subscription_info['channel_id'])
+        
+        # 2. Формируем прямую ссылку на канал для подписчиков
+        # ID обычно выглядит как -1001234567890. Для ссылки t.me/c/ нужно убрать "-100"
+        if raw_channel_id.startswith('-100'):
+            clean_id = raw_channel_id[4:] # Убираем первые 4 символа (-100)
+            channel_link = f"https://t.me/c/{clean_id}/1"
+        else:
+            # Если вдруг ID короткий (старый тип групп) или публичный юзернейм
+            channel_link = f"https://t.me/c/{raw_channel_id.replace('-', '')}/1"
+
+        text = (
+            f"📅 <b>Подписка активна до:</b> {end_date}\n\n"
+            f"🔗 <b>Ваш канал:</b> <a href=\"{channel_link}\">Открыть канал</a>\n"
+            f"<i>(Эта ссылка работает, если вы уже состоите в канале)</i>"
+        )
+        
+        await message.answer(text, parse_mode='HTML', disable_web_page_preview=True)
+        
+    else:
+        await message.answer("❌ Активная подписка не найдена.")
+
 
 @dp.message(Command('help'))
 async def help_command(message: types.Message, state: FSMContext):
