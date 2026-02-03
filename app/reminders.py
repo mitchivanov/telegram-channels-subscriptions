@@ -2,7 +2,7 @@ from celery import Celery
 from datetime import datetime, timedelta
 import os
 from app.subscription_service import subscription_service
-from app.database import User, UserSubscription
+from app.database import User, UserSubscription, SubscriptionPlan
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
@@ -45,6 +45,11 @@ celery.conf.beat_schedule = {
         'task': 'reminders.check_expired_subscriptions_task',
         'schedule': 300.0,  # Каждые 5 минут
     },
+    'force-cleanup-expired': {
+        'task': 'reminders.force_cleanup_expired_task',
+        'schedule': 3600.0,  # Запуск раз в час
+    },
+
 }
 
 celery.conf.timezone = 'UTC'
@@ -297,3 +302,75 @@ async def check_expired_subscriptions():
                 logging.info(f"Отозван доступ для подписки {sub.id}")
             except Exception as e:
                 logging.error(f"Ошибка при отзыве доступа для подписки {sub.id}: {e}")
+
+
+@celery.task(name='reminders.force_cleanup_expired_task')
+def force_cleanup_expired_task():
+    """Принудительная зачистка всех, у кого истекла дата, даже если is_active=False"""
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(force_cleanup_expired())
+
+async def force_cleanup_expired():
+    now = datetime.utcnow()
+    # Берем всех, у кого дата окончания прошла более 2 часов назад (чтобы не конфликтовать с основной задачей)
+    cutoff_time = now - timedelta(hours=2)
+    
+    async with subscription_service.async_session_maker() as session:
+        # Ищем подписки, которые истекли по времени
+        # Нам не важен статус is_active, мы хотим убедиться, что их нет в канале
+        result = await session.execute(
+            select(UserSubscription).where(
+                UserSubscription.end_date < cutoff_time
+            )
+        )
+        expired_subs = result.scalars().all()
+        
+        logging.info(f"CLEANUP: Найдено {len(expired_subs)} подписок для проверки удаления.")
+
+        for sub in expired_subs:
+            try:
+                # Получаем пользователя и план
+                user_stmt = select(User).where(User.id == sub.user_id)
+                user_res = await session.execute(user_stmt)
+                user = user_res.scalar_one_or_none()
+                
+                plan_stmt = select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
+                plan_res = await session.execute(plan_stmt)
+                plan = plan_res.scalar_one_or_none()
+                
+                if user and plan:
+                    channel_id = plan.channel_id
+                    user_tg_id = user.telegram_user_id
+                    
+                    # Пытаемся кикнуть из канала (Kick + Unban)
+                    try:
+                        # Сначала проверяем статус (чтобы не спамить запросами API, если юзера там нет)
+                        member = await subscription_service.bot.get_chat_member(chat_id=channel_id, user_id=user_tg_id)
+                        
+                        if member.status not in ('left', 'kicked'):
+                            logging.warning(f"CLEANUP: Найден нелегал! User {user_tg_id} (sub {sub.id}) всё ещё в канале. Удаляем...")
+                            await subscription_service.bot.ban_chat_member(chat_id=channel_id, user_id=user_tg_id)
+                            await subscription_service.bot.unban_chat_member(chat_id=channel_id, user_id=user_tg_id, only_if_banned=True)
+                            
+                            # Если вдруг он был True в базе - исправим
+                            if sub.is_active:
+                                sub.is_active = False
+                                session.add(sub)
+                                await session.commit()
+                        else:
+                            # Пользователя и так нет в канале, всё ок.
+                            # Если статус был True, ставим False
+                             if sub.is_active:
+                                sub.is_active = False
+                                session.add(sub)
+                                await session.commit()
+                                
+                    except Exception as e:
+                        if "user not found" in str(e).lower() or "participant" in str(e).lower():
+                             # Его там нет - отлично
+                             pass
+                        else:
+                            logging.error(f"CLEANUP Error for user {user_tg_id}: {e}")
+
+            except Exception as outer_e:
+                logging.error(f"CLEANUP Critical error on sub {sub.id}: {outer_e}")
