@@ -76,7 +76,7 @@ async def send_registration_reminders():
             select(User).where(
                 and_(
                     User.created_at <= three_hours_ago,
-                    User.registration_reminder_sent == False
+                    User.first_start_reminder_sent  == False
                 )
             )
         )
@@ -109,7 +109,7 @@ async def send_registration_reminders():
                         reply_markup=get_payment_keyboard()
                     )
                     
-                    user.registration_reminder_sent = True
+                    user.first_start_reminder_sent  = True
                     session.add(user)
                     logging.info(f"Отправлено напоминание о регистрации пользователю {user.telegram_user_id}")
                 except Exception as e:

@@ -293,55 +293,72 @@ class SubscriptionService:
             'invite_link': subscription.invite_link
         }
     
-    async def remove_user_access(self, subscription: UserSubscription, max_retries=3):
-        """
-        Удаляет пользователя из канала, отзывает ссылку-приглашение, помечает подписку как неактивную и очищает ссылку в базе.
-        Все действия выполняются в одной транзакции.
-        Теперь подписка всегда деактивируется, даже если возникла ошибка при удалении пользователя из канала.
-        """
+    async def remove_user_access(self, subscription, max_retries=3):
+        """Отзыв доступа пользователя к каналу"""
         if not self.bot:
-            logging.error("Бот не установлен в сервисе подписок")
+            logging.error("Бот не инициализирован в SubscriptionService")
             return False
+
+        # FIX: Открываем новую сессию и загружаем объект заново, чтобы избежать конфликта сессий
         async with self.async_session_maker() as session:
             async with session.begin():
-                result = await session.execute(select(User).where(User.id == int(subscription.user_id)))
-                user = result.scalar_one_or_none()
-                if not user:
-                    logging.error(f"Не найден пользователь для подписки {subscription.id}")
+                # Перечитываем подписку в текущей сессии по ID переданного объекта
+                stmt = select(UserSubscription).where(UserSubscription.id == subscription.id)
+                result = await session.execute(stmt)
+                db_subscription = result.scalar_one_or_none()
+
+                if not db_subscription:
+                    logging.error(f"Подписка {subscription.id} не найдена в базе при попытке удаления")
                     return False
-                # Пытаемся удалить пользователя из канала
+
+                # Загружаем пользователя для этой подписки
+                user_stmt = select(User).where(User.id == int(db_subscription.user_id))
+                user_result = await session.execute(user_stmt)
+                user = user_result.scalar_one_or_none()
+
+                if not user:
+                    logging.error(f"Пользователь для подписки {db_subscription.id} не найден")
+                    return False
+
+                # Логика бана в Telegram
                 removed = False
                 for attempt in range(max_retries):
                     try:
-                        await self.bot.ban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id)
-                        await self.bot.unban_chat_member(chat_id=subscription.channel_id, user_id=user.telegram_user_id, only_if_banned=True)
+                        await self.bot.ban_chat_member(chat_id=db_subscription.plan.channel_id, user_id=user.telegram_user_id)
+                        await self.bot.unban_chat_member(chat_id=db_subscription.plan.channel_id, user_id=user.telegram_user_id, only_if_banned=True)
                         removed = True
                         break
                     except Exception as e:
-                        if 'USER_NOT_PARTICIPANT' in str(e) or 'user not found' in str(e).lower() or 'chat not found' in str(e).lower():
-                            logging.info(f"[REMOVE] Пользователь {user.telegram_user_id} уже не состоит в канале {subscription.channel_id} или канал не найден.")
+                        if "USER_NOT_PARTICIPANT" in str(e) or "user not found" in str(e).lower() or "chat not found" in str(e).lower():
+                            logging.info(f"REMOVE: Пользователя {user.telegram_user_id} уже нет в канале {db_subscription.plan.channel_id} или канал недоступен.")
+                            removed = True # Считаем успехом, чтобы снять флаг активности
                             break
-                        logging.error(f"Ошибка при удалении пользователя (попытка {attempt+1}): {e}")
+                        logging.error(f"Ошибка при бане пользователя (попытка {attempt + 1}): {e}")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                # Пытаемся отозвать ссылку
-                if subscription.invite_link:
+                            await asyncio.sleep(2 + attempt + random.uniform(0, 1))
+
+                # Логика отзыва ссылки
+                if db_subscription.invite_link:
                     for attempt in range(max_retries):
                         try:
-                            await self.bot.revoke_chat_invite_link(chat_id=subscription.channel_id, invite_link=subscription.invite_link)
+                            await self.bot.revoke_chat_invite_link(chat_id=db_subscription.plan.channel_id, invite_link=db_subscription.invite_link)
                             break
                         except Exception as e:
-                            if 'INVITE_HASH_EXPIRED' in str(e) or 'not found' in str(e).lower():
-                                logging.info(f"[REMOVE] Ссылка уже неактивна или не найдена: {subscription.invite_link}")
+                            if "INVITE_HASH_EXPIRED" in str(e) or "not found" in str(e).lower():
+                                logging.info(f"REMOVE: Ссылка {db_subscription.invite_link} уже неактивна.")
                                 break
-                            logging.error(f"Ошибка при отзыве ссылки (попытка {attempt+1}): {e}")
+                            logging.error(f"Ошибка при отзыве ссылки (попытка {attempt + 1}): {e}")
                             if attempt < max_retries - 1:
-                                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                # ВСЕГДА деактивируем подписку и очищаем invite_link
-                subscription.is_active = False
-                subscription.invite_link = None
-                session.add(subscription)
-            return True
+                                await asyncio.sleep(2 + attempt + random.uniform(0, 1))
+
+                # Важно: меняем статус у объекта, загруженного в ЭТОЙ сессии
+                db_subscription.is_active = False
+                db_subscription.invite_link = None
+                session.add(db_subscription)
+                # commit произойдет автоматически при выходе из context manager session.begin()
+                
+        return True
+
 
     async def get_expiring_subscriptions(self, hours=24):
         """
