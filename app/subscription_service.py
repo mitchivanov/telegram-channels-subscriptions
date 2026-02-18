@@ -35,6 +35,14 @@ CHANNEL_IDS = {
     'premium_subscription': PREMIUM_CHANNEL_ID
 }
 
+NEW_PLANS = [
+    {'name': 'Подписка на 7 дней', 'days': 7, 'price': 6000},
+    {'name': 'Подписка на 1 месяц', 'days': 30, 'price': 18000},
+    {'name': 'Подписка на 3 месяца', 'days': 90, 'price': 45000},
+    {'name': 'Подписка на 6 месяцев', 'days': 180, 'price': 75000},
+    {'name': 'Подписка на 1 год', 'days': 365, 'price': 140000},
+]
+
 class SubscriptionService:
     def __init__(self, async_session_maker=None):
         self.engine = None
@@ -49,48 +57,80 @@ class SubscriptionService:
         self.bot = bot
     
     async def _init_subscription_plans(self):
-        """Инициализация базовых тарифных планов при первом запуске"""
+        """Инициализация тарифных планов и миграция старых подписок"""
         async with self.async_session_maker() as session:
-            result = await session.execute(select(SubscriptionPlan))
-            existing_plans = result.scalars().all()
-            if existing_plans:
-                return
+            # 1. Создаем новые планы, если их нет
+            new_plans_map = {} # map name -> plan object
             
-            # Базовый план на разные сроки
-            plans = [
-                # # Базовые планы
-                # {
-                #     'name': 'Умная экономия',
-                #     'description': '- товары с кешбэком до 90%\n- выбор категорий товаров\n- более 20 товаров с кешбэком 100% ежемесячно\n- ежемесячный розыгрыш товаров',
-                #     'price': 10000,
-                #     'duration_days': 30,
-                #     'channel_id': CHANNEL_IDS['basic_subscription']},
-
+            for plan_data in NEW_PLANS:
+                result = await session.execute(select(SubscriptionPlan).where(
+                    SubscriptionPlan.name == plan_data['name'],
+                    SubscriptionPlan.price == plan_data['price'],
+                    SubscriptionPlan.duration_days == plan_data['days']
+                ))
+                plan = result.scalar_one_or_none()
                 
-                # Премиум планы
-                {
-                    'name': 'Premium кешбэк',
-                    'description': 'Доступ к каналу',
-                    'price': 20000,
-                    'duration_days': 30,
-                    'channel_id': CHANNEL_IDS['premium_subscription']},
+                if not plan:
+                    plan = SubscriptionPlan(
+                        name=plan_data['name'],
+                        description=f"Доступ к каналу на {plan_data['days']} дней",
+                        price=plan_data['price'],
+                        duration_days=plan_data['days'],
+                        channel_id=CHANNEL_IDS['premium_subscription'] # Все новые планы для премиум канала
+                    )
+                    session.add(plan)
+                    await session.flush() # Получаем ID
+                    logging.info(f"Создан новый план: {plan.name}")
 
-            ]
+                new_plans_map[plan.name] = plan
             
-            if PAYMENT_TEST_MODE:
-                plans.append({'name': 'Доступ в канал', 'description': 'Доступ в канал Ivanoff о бизнесе',
-                              'price': 75000, 'duration_days': 30, 'channel_id': CHANNEL_IDS['basic_subscription']})
-            
-            for plan_data in plans:
-                # Убедимся, что цена - целое число
-                if not isinstance(plan_data['price'], int):
-                    plan_data['price'] = int(plan_data['price'])
-                plan = SubscriptionPlan(**plan_data)
-                session.add(plan)
+            # 2. Миграция: находим старые планы и переводим активные подписки на 'Подписка на 1 месяц'
+            # Целевой план для миграции
+            target_plan = new_plans_map.get('Подписка на 1 месяц')
+            if not target_plan:
+                logging.error("Не удалось найти целевой план 'Подписка на 1 месяц' для миграции!")
+            else:
+                # Получаем все планы, которые НЕ являются новыми планами
+                new_plan_ids = [p.id for p in new_plans_map.values()]
+                result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id.not_in(new_plan_ids)))
+                old_plans = result.scalars().all()
+
+                old_plan_ids = [p.id for p in old_plans]
+
+                if old_plan_ids:
+                    # Находим все активные подписки на старые планы
+                    result = await session.execute(select(UserSubscription).where(
+                        UserSubscription.plan_id.in_(old_plan_ids),
+                        UserSubscription.is_active == True
+                    ))
+                    subscriptions_to_migrate = result.scalars().all()
+
+                    if subscriptions_to_migrate:
+                        logging.info(f"Найдено {len(subscriptions_to_migrate)} подписок для миграции на новый тариф.")
+                        for sub in subscriptions_to_migrate:
+                            sub.plan_id = target_plan.id
+                            session.add(sub)
+
+                        logging.info("Миграция подписок завершена.")
             
             await session.commit()
-            logging.info(f"Инициализированы планы подписки: {len(plans)} планов")
-    
+
+    async def get_active_plans(self):
+        """Возвращает список актуальных тарифных планов"""
+        async with self.async_session_maker() as session:
+             # Возвращаем планы, соответствующие списку NEW_PLANS
+            plans = []
+            for plan_def in NEW_PLANS:
+                result = await session.execute(select(SubscriptionPlan).where(
+                    SubscriptionPlan.name == plan_def['name'],
+                    SubscriptionPlan.price == plan_def['price'],
+                    SubscriptionPlan.duration_days == plan_def['days']
+                ))
+                plan = result.scalar_one_or_none()
+                if plan:
+                    plans.append(plan)
+            return plans
+
     async def get_user_by_telegram_id(self, telegram_user_id):
         """Получение пользователя по Telegram ID или создание нового"""
         async with self.async_session_maker() as session:
@@ -107,21 +147,26 @@ class SubscriptionService:
     
     
     async def get_default_month_plan(self):
+        # Возвращаем новый план на 1 месяц
         async with self.async_session_maker() as session:
+            # Исправляем запрос выше или ищем по параметрам
             result = await session.execute(
                 select(SubscriptionPlan).where(
-                    SubscriptionPlan.price == 20000,  # 200 ₽ * 100
-                    SubscriptionPlan.duration_days == 30
+                    SubscriptionPlan.name == 'Подписка на 1 месяц',
+                    SubscriptionPlan.duration_days == 30,
+                    SubscriptionPlan.price == 18000
                 )
             )
             plan = result.scalar_one_or_none()
             if not plan:
-                raise ValueError("Не найден план на 30 дней за 200₽")
+                 # Fallback if creation hasn't happened yet for some reason
+                 return None
             return plan
     
     
     async def get_subscription_plan(self, subscription_type, duration):
         """Получение подходящего плана подписки по типу и длительности"""
+        # Этот метод устарел, но оставим его работоспособным, если вдруг используется
         # Формируем название плана из типа и длительности
         if duration == '5_min':
             plan_name = f"{SUBSCRIPTION_TYPE_MAP[subscription_type]} 5 минут"
@@ -133,6 +178,11 @@ class SubscriptionService:
             result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.name == plan_name))
             plan = result.scalar_one_or_none()
         
+        # Если не нашли старый план, попробуем вернуть один из новых, если подходит по длительности
+        if not plan:
+             # Fallback logic could be added here
+             pass
+
         if not plan:
             raise ValueError(f"План подписки {plan_name} не найден")
         
@@ -394,4 +444,4 @@ class SubscriptionService:
 
 # Глобальный экземпляр сервиса подписок
 subscription_service = SubscriptionService()
-# (async инициализация тарифных планов вызывается отдельно в main/startup) 
+# (async инициализация тарифных планов вызывается отдельно в main/startup)

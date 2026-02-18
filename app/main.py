@@ -73,7 +73,7 @@ async def start_command(message: types.Message, state: FSMContext):
                 await session.commit()
                 
     text1 = WELCOME_TEXT
-    text2 = "🔥Доступ к каналу с товарами за 200₽ в месяц"
+    text2 = "🔥Доступ к каналу с товарами от 60₽"
     
     await message.answer(text1, parse_mode='HTML',
                          #reply_markup=await get_reply_keyboard(keyboard_type='start')
@@ -231,27 +231,47 @@ async def process_join_request(join_request: ChatJoinRequest):
 
 @dp.callback_query(F.data == 'buy_subscription')
 async def buy_subscription(callback: types.CallbackQuery, state: FSMContext):
-    # Переходим в состояние выбора типа подписки
-    # await state.set_state(SubscriptionStates.choosing_type)
-    # Получаем все тарифы из базы
-    # async with subscription_service.async_session_maker() as session:
-    #     result = await session.execute(select(SubscriptionPlan))
-    #     plans = result.scalars().all()
-    # Формируем клавиатуру с вариантами тарифов
-    plan = await subscription_service.get_default_month_plan()
+    # Получаем актуальные тарифы
+    plans = await subscription_service.get_active_plans()
     
-    # keyboard = types.InlineKeyboardMarkup(
-    #     inline_keyboard=[
-    #         [types.InlineKeyboardButton(text=plan.name, callback_data=f'plan_{plan.id}')]
-    #         for plan in plans
-    #     ]
-    # )
-    # try:
-    #     await callback.message.edit_text('Выберите тип подписки:', reply_markup=keyboard)
-    # except Exception as e:
-    #     await callback.message.answer('Выберите тип подписки:', reply_markup=keyboard)
+    # Сортируем планы по цене
+    plans.sort(key=lambda x: x.price)
+
+    keyboard_buttons = []
+    for plan in plans:
+        # Форматируем цену: 6000 -> 60 RUB
+        price_rub = int(plan.price / 100)
+        button_text = f"{plan.name} - {price_rub}₽"
+        keyboard_buttons.append([types.InlineKeyboardButton(text=button_text, callback_data=f'select_plan_{plan.id}')])
+
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     
-    await send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False)
+    await callback.message.answer('Выберите подходящий тариф:', reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data == 'change_subscription')
+async def change_subscription(callback: types.CallbackQuery, state: FSMContext):
+    # Логика та же, что и при покупке - показываем список тарифов
+    await buy_subscription(callback, state)
+
+@dp.callback_query(F.data.startswith('select_plan_'))
+async def process_plan_selection(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        plan_id = int(callback.data.split('_')[-1])
+
+        # Получаем план
+        async with subscription_service.async_session_maker() as session:
+            result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == plan_id))
+            plan = result.scalar_one_or_none()
+
+        if not plan:
+            await callback.message.answer("Ошибка: тариф не найден.")
+            return
+
+        await send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False)
+    except Exception as e:
+        logging.error(f"Error in process_plan_selection: {e}")
+        await callback.message.answer("Произошла ошибка при выборе тарифа.")
 
 async def send_invoice_for_plan(callback, state, plan, edit=False, is_extension=False):
     # preview_text = (
