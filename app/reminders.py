@@ -1,8 +1,20 @@
-from celery import Celery
 import os
+import logging
+from celery import Celery
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения в самом начале
+load_dotenv()
+
+# Импорт сервисов после загрузки переменных
 from app.subscription_service import subscription_service
+from app.google_sheets_service import google_sheets_service
 from aiogram import Bot
 import asyncio
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
 if not CELERY_BROKER_URL:
@@ -86,3 +98,22 @@ def force_cleanup_expired_task():
     """Принудительная зачистка всех, у кого истекла дата"""
     loop = asyncio.get_event_loop()
     loop.run_until_complete(subscription_service.force_cleanup_expired())
+
+@celery.task(name='reminders.record_payment_task')
+def record_payment_task(user_id, username, amount, duration_days, plan_name, payment_type, transaction_id):
+    """
+    Асинхронная задача для записи платежа в Google Sheets.
+    """
+    try:
+        google_sheets_service.append_payment(
+            user_id=user_id,
+            username=username,
+            amount=amount,
+            duration_days=duration_days,
+            plan_name=plan_name,
+            payment_type=payment_type,
+            transaction_id=transaction_id
+        )
+    except Exception as e:
+        # Логируем, но не роняем задачу
+        logger.error(f"Ошибка при выполнении задачи записи в Google Sheets: {e}")
