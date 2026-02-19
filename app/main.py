@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from app.subscription_service import subscription_service, CHANNEL_IDS
+from app.subscription_service import subscription_service, CHANNEL_IDS, DEFAULT_PLAN_PRICE
 from app.database import User, UserSubscription, SubscriptionPlan, PaymentError, async_init_db
 from aiogram.types import LabeledPrice
 from aiogram.types.message import ContentType
@@ -95,7 +95,16 @@ async def start_command(message: types.Message, state: FSMContext):
                 await session.commit()
                 
     text1 = WELCOME_TEXT
-    text2 = "🔥Доступ к каналу с товарами за 200₽ в месяц"
+
+    # Получаем актуальную цену из дефолтного плана
+    try:
+        plan = await subscription_service.get_default_month_plan()
+        price_rub = plan.price // 100
+    except Exception as e:
+        logging.error(f"Ошибка при получении дефолтного плана для стартового сообщения: {e}")
+        price_rub = DEFAULT_PLAN_PRICE // 100 # fallback
+
+    text2 = f"🔥Доступ к каналу с товарами за {price_rub}₽ в месяц"
     
     await message.answer(text1, parse_mode='HTML',
                          #reply_markup=await get_reply_keyboard(keyboard_type='start')
