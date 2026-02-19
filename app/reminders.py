@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import logging
 from sqlalchemy import select, and_
+from sqlalchemy.orm import joinedload
 
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
 if not CELERY_BROKER_URL:
@@ -81,44 +82,33 @@ async def send_registration_reminders():
             select(User).where(
                 and_(
                     User.created_at <= three_hours_ago,
-                    User.first_start_reminder_sent  == False
+                    User.first_start_reminder_sent  == False,
+                    ~User.subscriptions.any(UserSubscription.is_active == True)
                 )
             )
         )
         users = result.scalars().all()
         
         for user in users:
-            # Проверяем, есть ли у пользователя активная подписка
-            sub_result = await session.execute(
-                select(UserSubscription).where(
-                    and_(
-                        UserSubscription.user_id == user.id,
-                        UserSubscription.is_active == True
-                    )
+            try:
+                first_name = user.first_name or "Друг"
+                text = (
+                    f"{first_name}! Мы ждём Вас в нашем канале с эксклюзивными товарами "
+                    f"за кешбэк 100 %. Осталось только оплатить подписку — сделаем это прямо сейчас?\n\n"
+                    f"Начните зарабатывать и экономить уже сегодня💥"
                 )
-            )
-            has_subscription = sub_result.scalar_one_or_none()
-            
-            if not has_subscription:
-                try:
-                    first_name = user.first_name or "Друг"
-                    text = (
-                        f"{first_name}! Мы ждём Вас в нашем канале с эксклюзивными товарами "
-                        f"за кешбэк 100 %. Осталось только оплатить подписку — сделаем это прямо сейчас?\n\n"
-                        f"Начните зарабатывать и экономить уже сегодня💥"
-                    )
-                    
-                    await bot.send_message(
-                        chat_id=user.telegram_user_id,
-                        text=text,
-                        reply_markup=get_payment_keyboard()
-                    )
-                    
-                    user.first_start_reminder_sent  = True
-                    session.add(user)
-                    logging.info(f"Отправлено напоминание о регистрации пользователю {user.telegram_user_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке напоминания о регистрации пользователю {user.telegram_user_id}: {e}")
+
+                await bot.send_message(
+                    chat_id=user.telegram_user_id,
+                    text=text,
+                    reply_markup=get_payment_keyboard()
+                )
+
+                user.first_start_reminder_sent  = True
+                session.add(user)
+                logging.info(f"Отправлено напоминание о регистрации пользователю {user.telegram_user_id}")
+            except Exception as e:
+                logging.error(f"Ошибка при отправке напоминания о регистрации пользователю {user.telegram_user_id}: {e}")
         
         await session.commit()
 
@@ -135,7 +125,7 @@ async def send_subscription_reminders():
     async with subscription_service.async_session_maker() as session:
         # Находим подписки, истекающие через 24 часа
         result = await session.execute(
-            select(UserSubscription).where(
+            select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                 and_(
                     UserSubscription.is_active == True,
                     UserSubscription.end_date <= tomorrow,
@@ -148,10 +138,7 @@ async def send_subscription_reminders():
         
         for sub in subscriptions:
             try:
-                user_result = await session.execute(
-                    select(User).where(User.id == sub.user_id)
-                )
-                user = user_result.scalar_one_or_none()
+                user = sub.user
                 
                 if user:
                     text = (
@@ -187,7 +174,7 @@ async def send_last_day_reminders():
     async with subscription_service.async_session_maker() as session:
         # Находим подписки, истекающие сегодня
         result = await session.execute(
-            select(UserSubscription).where(
+            select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                 and_(
                     UserSubscription.is_active == True,
                     UserSubscription.end_date <= end_of_today,
@@ -200,10 +187,7 @@ async def send_last_day_reminders():
         
         for sub in subscriptions:
             try:
-                user_result = await session.execute(
-                    select(User).where(User.id == sub.user_id)
-                )
-                user = user_result.scalar_one_or_none()
+                user = sub.user
                 
                 if user:
                     text = (
@@ -237,7 +221,7 @@ async def send_expired_reminders():
     async with subscription_service.async_session_maker() as session:
         # Находим подписки, которые только что истекли
         result = await session.execute(
-            select(UserSubscription).where(
+            select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                 and_(
                     UserSubscription.is_active == False,
                     UserSubscription.end_date <= now,
@@ -249,10 +233,7 @@ async def send_expired_reminders():
         
         for sub in subscriptions:
             try:
-                user_result = await session.execute(
-                    select(User).where(User.id == sub.user_id)
-                )
-                user = user_result.scalar_one_or_none()
+                user = sub.user
                 
                 if user:
                     first_name = user.first_name or "Друг"
@@ -319,7 +300,10 @@ async def force_cleanup_expired():
         # Ищем подписки, которые истекли по времени
         # Нам не важен статус is_active, мы хотим убедиться, что их нет в канале
         result = await session.execute(
-            select(UserSubscription).where(
+            select(UserSubscription).options(
+                joinedload(UserSubscription.user),
+                joinedload(UserSubscription.plan)
+            ).where(
                 UserSubscription.end_date < cutoff_time
             )
         )
@@ -330,13 +314,8 @@ async def force_cleanup_expired():
         for sub in expired_subs:
             try:
                 # Получаем пользователя и план
-                user_stmt = select(User).where(User.id == sub.user_id)
-                user_res = await session.execute(user_stmt)
-                user = user_res.scalar_one_or_none()
-                
-                plan_stmt = select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
-                plan_res = await session.execute(plan_stmt)
-                plan = plan_res.scalar_one_or_none()
+                user = sub.user
+                plan = sub.plan
                 
                 if user and plan:
                     channel_id = plan.channel_id
