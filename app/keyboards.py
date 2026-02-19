@@ -29,7 +29,7 @@ async def get_inline_keyboard(keyboard_type: str):
             inline_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text='Продлить подписку', callback_data='extend_subscription')],
-                    #[InlineKeyboardButton(text='Сменить тариф', callback_data='change_subscription')],
+                    [InlineKeyboardButton(text='Сменить тариф', callback_data='change_subscription')],
                     [InlineKeyboardButton(text='Отменить подписку', callback_data='cancel_subscription')],
                     # [InlineKeyboardButton(text='Вернуться назад', callback_data='back_to_start')]
                 ]
