@@ -25,7 +25,7 @@ from app.subscription_service import SubscriptionManager
 import json
 
 from entry_text import WELCOME_TEXT
-from app.reminders import record_payment_task
+from app.scheduler import setup_scheduler, async_record_payment
 
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -606,9 +606,9 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                 # Логируем содержимое подписки из базы
                 logging.info(f"[PAYMENT] Итоговое состояние подписки в базе: {subscription}")
 
-                # Запись в Google Sheets через Celery
+                # Запись в Google Sheets через Scheduler (async wrapper)
                 try:
-                    record_payment_task.delay(
+                    asyncio.create_task(async_record_payment(
                         user_id=message.from_user.id,
                         username=message.from_user.username,
                         amount=payment_info.total_amount / 100,  # Конвертируем в рубли
@@ -616,10 +616,10 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         plan_name=plan.name,
                         payment_type="Новая",
                         transaction_id=provider_payment_charge_id
-                    )
-                    logging.info(f"[PAYMENT] Задача записи в Google Sheets отправлена в Celery")
+                    ))
+                    logging.info(f"[PAYMENT] Задача записи в Google Sheets отправлена в фоновом режиме")
                 except Exception as gs_error:
-                    logging.error(f"[PAYMENT][ERROR] Ошибка при отправке задачи в Celery: {gs_error}")
+                    logging.error(f"[PAYMENT][ERROR] Ошибка при отправке задачи записи в Google Sheets: {gs_error}")
 
             except Exception as e:
                 stack_trace = traceback.format_exc()
@@ -747,9 +747,9 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                     )
                 logging.info(f"[PAYMENT][EXTEND] Подписка успешно продлена для пользователя {message.from_user.id}, ID={subscription.id}, план {plan_id}")
             
-                # Запись в Google Sheets через Celery
+                # Запись в Google Sheets через Scheduler (async wrapper)
                 try:
-                    record_payment_task.delay(
+                    asyncio.create_task(async_record_payment(
                         user_id=message.from_user.id,
                         username=message.from_user.username,
                         amount=payment_info.total_amount / 100,
@@ -757,10 +757,10 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         plan_name=plan.name,
                         payment_type="Продление",
                         transaction_id=provider_payment_charge_id
-                    )
-                    logging.info(f"[PAYMENT][EXTEND] Задача записи в Google Sheets отправлена в Celery")
+                    ))
+                    logging.info(f"[PAYMENT][EXTEND] Задача записи в Google Sheets отправлена в фоновом режиме")
                 except Exception as gs_error:
-                    logging.error(f"[PAYMENT][EXTEND][ERROR] Ошибка при отправке задачи в Celery: {gs_error}")
+                    logging.error(f"[PAYMENT][EXTEND][ERROR] Ошибка при отправке задачи записи в Google Sheets: {gs_error}")
 
             except Exception as e:
                 stack_trace = traceback.format_exc()
@@ -952,7 +952,23 @@ async def main():
     await async_init_db()  # Сначала создаём таблицы!
     await subscription_service._init_subscription_plans()  # Потом инициализируем тарифы
 
-    # Запускаем поллинг (мониторинг подписок теперь выполняется через Celery)
+    # Настройка планировщика
+    scheduler = setup_scheduler()
+
+    # Хуки запуска и остановки
+    async def on_startup(*args, **kwargs):
+        logging.info("Запуск планировщика...")
+        scheduler.start()
+
+    async def on_shutdown(*args, **kwargs):
+        logging.info("Остановка планировщика...")
+        scheduler.shutdown(wait=True)
+
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # Запускаем поллинг
+    logging.info("Запуск поллинга...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

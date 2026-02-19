@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 # 1. Запоминаем URL БД до того, как любые импорты приложения (и локальный .env) смогут его перезаписать.
 # В Docker это будет URL с хостом 'db:5432', как указано в docker-compose.test.yml
 ACTUAL_DB_URL = os.environ.get('DATABASE_URL', 'sqlite+aiosqlite:///:memory:')
+os.environ['DATABASE_URL'] = ACTUAL_DB_URL  # Ensure it is set for app.database check
 
 # Добавляем папку app в sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../app')))

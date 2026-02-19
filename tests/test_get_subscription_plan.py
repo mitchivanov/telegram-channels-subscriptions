@@ -14,8 +14,6 @@ mock_modules = [
     'aiogram.utils',
     'dotenv',
     'asyncpg',
-    'celery',
-    'redis',
 ]
 for module_name in mock_modules:
     if module_name not in sys.modules:
