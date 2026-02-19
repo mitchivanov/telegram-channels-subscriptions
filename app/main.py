@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from app.subscription_service import subscription_service, CHANNEL_IDS
+from app.subscription_service import subscription_service, CHANNEL_IDS, DEFAULT_PLAN_PRICE
 from app.database import User, UserSubscription, SubscriptionPlan, PaymentError, async_init_db
 from aiogram.types import LabeledPrice
 from aiogram.types.message import ContentType
@@ -41,6 +41,28 @@ if IS_TEST_MODE and not TELEGRAM_PAYMENT_TOKEN.startswith('381764678:TEST:'):
 class SubscriptionStates(StatesGroup):
     #choosing_type = State()
     confirming_payment = State()
+
+
+def get_sanitized_payment_info(payment_info: types.SuccessfulPayment) -> str:
+    """
+    Возвращает строковое представление объекта SuccessfulPayment с удаленными персональными данными.
+    """
+    if payment_info is None:
+        return "None"
+
+    try:
+        # В aiogram 3.x объекты являются моделями Pydantic
+        if hasattr(payment_info, 'model_dump'):
+            payment_dict = payment_info.model_dump()
+        else:
+            payment_dict = dict(payment_info)
+
+        if payment_dict.get('order_info'):
+            payment_dict['order_info'] = "[REDACTED]"
+        return str(payment_dict)
+    except Exception:
+        # Резервный вариант на случай ошибки при сериализации
+        return f"SuccessfulPayment(total_amount={getattr(payment_info, 'total_amount', 'unknown')}, currency='{getattr(payment_info, 'currency', 'unknown')}', order_info=[REDACTED])"
 
 
 # Хранилище состояний в памяти
@@ -500,12 +522,13 @@ async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery)
 # Обработчик успешной оплаты
 @dp.message(F.content_type == ContentType.SUCCESSFUL_PAYMENT)
 async def process_successful_payment(message: types.Message, state: FSMContext):
-    logging.info(f"[PAYMENT] Получено уведомление об успешном платеже: {message.successful_payment}")
+    logging.info(f"[PAYMENT] Получено уведомление об успешном платеже: {get_sanitized_payment_info(message.successful_payment)}")
     try:
         payment_info = message.successful_payment
         payload = payment_info.invoice_payload
         provider_payment_charge_id = payment_info.provider_payment_charge_id
-        logging.info(f"[PAYMENT] payload={payload}, charge_id={provider_payment_charge_id}, сумма={payment_info.total_amount}, валюта={payment_info.currency}, order_info={payment_info.order_info}")
+        # Не логируем order_info напрямую, так как он содержит персональные данные (email)
+        logging.info(f"[PAYMENT] payload={payload}, charge_id={provider_payment_charge_id}, сумма={payment_info.total_amount}, валюта={payment_info.currency}, order_info=[REDACTED]")
         
         # Обработка различных типов платежей
         if payload.startswith('plan_'):
@@ -575,7 +598,7 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                             payment_currency=payment_info.currency,
                             error_message=str(e),
                             invoice_payload=payload,
-                            payment_info=str(payment_info),
+                            payment_info=get_sanitized_payment_info(payment_info),
                             stack_trace=stack_trace
                         )
                         session.add(payment_error)
@@ -590,7 +613,7 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                     "plan_id": plan_id,
                     "charge_id": provider_payment_charge_id,
                     "payment_time": datetime.now().isoformat(),
-                    "payment_info": str(payment_info),
+                    "payment_info": get_sanitized_payment_info(payment_info),
                     "error": str(e)
                 }
                 logging.critical(f"[PAYMENT][EMERGENCY] Данные платежа для ручного восстановления: {emergency_info}")
@@ -683,7 +706,7 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                             payment_currency=payment_info.currency,
                             error_message=f"Ошибка при продлении подписки: {str(e)}",
                             invoice_payload=payload,
-                            payment_info=str(payment_info),
+                            payment_info=get_sanitized_payment_info(payment_info),
                             stack_trace=stack_trace
                         )
                         session.add(payment_error)
@@ -718,7 +741,7 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         payment_currency=getattr(payment_info, 'currency', None),
                         error_message=str(e),
                         invoice_payload=getattr(payment_info, 'invoice_payload', None),
-                        payment_info=str(payment_info) if 'payment_info' in locals() else None,
+                        payment_info=get_sanitized_payment_info(payment_info) if 'payment_info' in locals() else None,
                         stack_trace=stack_trace
                     )
                     session.add(payment_error)

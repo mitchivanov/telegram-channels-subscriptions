@@ -14,6 +14,11 @@ load_dotenv()
 
 PAYMENT_TEST_MODE = os.getenv('PAYMENT_TEST_MODE', 'False').lower() in ('true', '1', 't')
 
+# Дефолтные значения для основного плана подписки
+DEFAULT_PLAN_NAME = os.getenv('DEFAULT_PLAN_NAME', 'Premium кешбэк')
+DEFAULT_PLAN_PRICE = int(os.getenv('DEFAULT_PLAN_PRICE', 20000))
+DEFAULT_PLAN_DURATION = int(os.getenv('DEFAULT_PLAN_DURATION', 30))
+
 # Словарь соответствия callback_data и реальных значений
 SUBSCRIPTION_TYPE_MAP = {
     'basic_subscription': 'Базовый',
