@@ -3,9 +3,13 @@ from aiogram import Bot, Dispatcher, types
 from aiogram import Router, types, F
 from aiogram.filters import Command
 import os
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения в самом начале
+load_dotenv()
+
 from keyboards import get_inline_keyboard
 import logging
-from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,9 +25,8 @@ from app.subscription_service import SubscriptionManager
 import json
 
 from entry_text import WELCOME_TEXT
+from app.reminders import record_payment_task
 
-
-load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TELEGRAM_BOT_TOKEN:
@@ -602,6 +605,22 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                 logging.info(f"[PAYMENT] Подписка успешно создана для пользователя {message.from_user.id}, план {plan_id}, charge_id={provider_payment_charge_id}")
                 # Логируем содержимое подписки из базы
                 logging.info(f"[PAYMENT] Итоговое состояние подписки в базе: {subscription}")
+
+                # Запись в Google Sheets через Celery
+                try:
+                    record_payment_task.delay(
+                        user_id=message.from_user.id,
+                        username=message.from_user.username,
+                        amount=payment_info.total_amount / 100,  # Конвертируем в рубли
+                        duration_days=plan.duration_days,
+                        plan_name=plan.name,
+                        payment_type="Новая",
+                        transaction_id=provider_payment_charge_id
+                    )
+                    logging.info(f"[PAYMENT] Задача записи в Google Sheets отправлена в Celery")
+                except Exception as gs_error:
+                    logging.error(f"[PAYMENT][ERROR] Ошибка при отправке задачи в Celery: {gs_error}")
+
             except Exception as e:
                 stack_trace = traceback.format_exc()
                 logging.critical(f"[PAYMENT][CRITICAL_ERROR] Ошибка при создании подписки после оплаты: {str(e)}\nTRACEBACK: {stack_trace}")
@@ -728,6 +747,21 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                     )
                 logging.info(f"[PAYMENT][EXTEND] Подписка успешно продлена для пользователя {message.from_user.id}, ID={subscription.id}, план {plan_id}")
             
+                # Запись в Google Sheets через Celery
+                try:
+                    record_payment_task.delay(
+                        user_id=message.from_user.id,
+                        username=message.from_user.username,
+                        amount=payment_info.total_amount / 100,
+                        duration_days=plan.duration_days,
+                        plan_name=plan.name,
+                        payment_type="Продление",
+                        transaction_id=provider_payment_charge_id
+                    )
+                    logging.info(f"[PAYMENT][EXTEND] Задача записи в Google Sheets отправлена в Celery")
+                except Exception as gs_error:
+                    logging.error(f"[PAYMENT][EXTEND][ERROR] Ошибка при отправке задачи в Celery: {gs_error}")
+
             except Exception as e:
                 stack_trace = traceback.format_exc()
                 logging.critical(f"[PAYMENT][EXTEND][ERROR] Ошибка при продлении подписки: {str(e)}\nTRACEBACK: {stack_trace}")
@@ -922,9 +956,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
-
-
-
-
-
+    asyncio.run(main())
