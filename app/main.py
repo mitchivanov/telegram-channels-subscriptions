@@ -836,52 +836,24 @@ async def monitor_subscriptions():
     while True:
         try:
             now = datetime.utcnow()
+
             # Напоминания за 24 часа до окончания
-            expiring = await subscription_service.get_expiring_subscriptions(hours=24)
-            for sub in expiring:
-                if not getattr(sub, 'reminder_sent', False):
-                    # Получаем пользователя асинхронно
-                    user = await subscription_service.get_user_by_telegram_id(sub.user_id)
-                    if user:
-                        try:
-                            await bot.send_message(
-                                chat_id=user.telegram_user_id,
-                                text="⏰ Ваша подписка истекает через 24 часа! Продлите её, чтобы не потерять доступ к каналу."
-                            )
-                            sub.reminder_sent = True
-                            # Сохраняем обновление через асинхронный сервис
-                            # (можно реализовать отдельный метод для этого)
-                        except Exception as e:
-                            logging.error(f"Ошибка при отправке напоминания пользователю {user.telegram_user_id}: {e}")
+            await subscription_service.process_24h_reminders()
+
             # Отзыв доступа для истекших подписок
-            expired = await subscription_service.get_expired_subscriptions()  # реализовать этот метод
+            expired = await subscription_service.get_expired_subscriptions()
             for sub in expired:
-                user = await subscription_service.get_user_by_telegram_id(sub.user_id)
                 try:
                     # Отзываем доступ и ссылку (invite_link будет очищен)
                     logging.info(f"Отзыв доступа и ссылки для истекшей подписки {sub.id}, user_id={sub.user_id}")
                     await subscription_service.remove_user_access(sub)
-                    if user:
-                        await bot.send_message(
-                            chat_id=user.telegram_user_id,
-                            text="❌ Ваша подписка истекла. Доступ к каналу отозван. Оформите новую подписку для восстановления доступа."
-                        )
                 except Exception as e:
-                    logging.error(f"Ошибка при отзыве доступа у пользователя {getattr(user, 'telegram_user_id', '?')}: {e}\n{traceback.format_exc()}")
-            # Проверяем подписки, которые истекли за последние 2 минуты
-            recently_expired = await subscription_service.get_recently_expired_subscriptions(last_check, now)  # реализовать этот метод
-            for sub in recently_expired:
-                if not getattr(sub, 'reminder_sent', False):
-                    user = await subscription_service.get_user_by_telegram_id(sub.user_id)
-                    if user:
-                        try:
-                            await bot.send_message(
-                                chat_id=user.telegram_user_id,
-                                text="❌ Ваша подписка истекла. Доступ к каналу отозван. Оформите новую подписку для восстановления доступа."
-                            )
-                            sub.reminder_sent = True
-                        except Exception as e:
-                            logging.error(f"Ошибка при отправке уведомления о завершении подписки пользователю {user.telegram_user_id}: {e}")
+                    user_id = getattr(sub, 'user_id', '?')
+                    logging.error(f"Ошибка при отзыве доступа у пользователя (sub_id={sub.id}, user_id={user_id}): {e}\n{traceback.format_exc()}")
+
+            # Проверяем подписки, которые истекли за последние 2 минуты, и отправляем уведомления
+            await subscription_service.process_expired_notifications(last_check, now)
+
             last_check = now
         except Exception as e:
             logging.error(f"Ошибка в задаче мониторинга подписок: {e}\n{traceback.format_exc()}")

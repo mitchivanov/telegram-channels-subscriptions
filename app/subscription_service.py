@@ -7,6 +7,7 @@ import logging
 import asyncio
 from sqlalchemy import select
 import random
+import traceback
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -441,6 +442,78 @@ class SubscriptionService:
                 UserSubscription.end_date < now
             ))
             return result.scalars().all()
+
+    async def process_24h_reminders(self):
+        """Отправляет напоминания за 24 часа до окончания подписки"""
+        if not self.bot:
+            logging.error("Бот не инициализирован в SubscriptionService")
+            return
+
+        try:
+            expiring = await self.get_expiring_subscriptions(hours=24)
+            for sub in expiring:
+                if not getattr(sub, 'reminder_sent', False):
+                    # Открываем сессию для обновления флага
+                    async with self.async_session_maker() as session:
+                         # Обновляем объект, привязывая его к новой сессии, если нужно, или загружаем заново
+                        stmt = select(UserSubscription).where(UserSubscription.id == sub.id)
+                        result = await session.execute(stmt)
+                        db_sub = result.scalar_one_or_none()
+
+                        if db_sub and not db_sub.reminder_sent:
+                            user_stmt = select(User).where(User.id == db_sub.user_id)
+                            user_result = await session.execute(user_stmt)
+                            user = user_result.scalar_one_or_none()
+
+                            if user:
+                                try:
+                                    await self.bot.send_message(
+                                        chat_id=user.telegram_user_id,
+                                        text="⏰ Ваша подписка истекает через 24 часа! Продлите её, чтобы не потерять доступ к каналу."
+                                    )
+                                    db_sub.reminder_sent = True
+                                    session.add(db_sub)
+                                    await session.commit()
+                                except Exception as e:
+                                    logging.error(f"Ошибка при отправке напоминания пользователю {user.telegram_user_id}: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка в process_24h_reminders: {e}\n{traceback.format_exc()}")
+
+    async def process_expired_notifications(self, last_check, now):
+        """Отправляет уведомления об истечении подписки"""
+        if not self.bot:
+            logging.error("Бот не инициализирован в SubscriptionService")
+            return
+
+        try:
+            recently_expired = await self.get_recently_expired_subscriptions(last_check, now)
+            for sub in recently_expired:
+                # Используем expired_reminder_sent вместо reminder_sent!
+                if not getattr(sub, 'expired_reminder_sent', False):
+                     async with self.async_session_maker() as session:
+                        stmt = select(UserSubscription).where(UserSubscription.id == sub.id)
+                        result = await session.execute(stmt)
+                        db_sub = result.scalar_one_or_none()
+
+                        if db_sub and not db_sub.expired_reminder_sent:
+                            user_stmt = select(User).where(User.id == db_sub.user_id)
+                            user_result = await session.execute(user_stmt)
+                            user = user_result.scalar_one_or_none()
+
+                            if user:
+                                try:
+                                    await self.bot.send_message(
+                                        chat_id=user.telegram_user_id,
+                                        text="❌ Ваша подписка истекла. Доступ к каналу отозван. Оформите новую подписку для восстановления доступа."
+                                    )
+                                    db_sub.expired_reminder_sent = True
+                                    session.add(db_sub)
+                                    await session.commit()
+                                except Exception as e:
+                                    logging.error(f"Ошибка при отправке уведомления о завершении подписки пользователю {user.telegram_user_id}: {e}")
+
+        except Exception as e:
+            logging.error(f"Ошибка в process_expired_notifications: {e}\n{traceback.format_exc()}")
 
 # Глобальный экземпляр сервиса подписок
 subscription_service = SubscriptionService()
