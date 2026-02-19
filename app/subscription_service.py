@@ -13,6 +13,11 @@ load_dotenv()
 
 PAYMENT_TEST_MODE = os.getenv('PAYMENT_TEST_MODE', 'False').lower() in ('true', '1', 't')
 
+# Дефолтные значения для основного плана подписки
+DEFAULT_PLAN_NAME = os.getenv('DEFAULT_PLAN_NAME', 'Premium кешбэк')
+DEFAULT_PLAN_PRICE = int(os.getenv('DEFAULT_PLAN_PRICE', 20000))
+DEFAULT_PLAN_DURATION = int(os.getenv('DEFAULT_PLAN_DURATION', 30))
+
 # Словарь соответствия callback_data и реальных значений
 SUBSCRIPTION_TYPE_MAP = {
     'basic_subscription': 'Базовый',
@@ -69,10 +74,10 @@ class SubscriptionService:
                 
                 # Премиум планы
                 {
-                    'name': 'Premium кешбэк',
+                    'name': DEFAULT_PLAN_NAME,
                     'description': 'Доступ к каналу',
-                    'price': 20000,
-                    'duration_days': 30,
+                    'price': DEFAULT_PLAN_PRICE,
+                    'duration_days': DEFAULT_PLAN_DURATION,
                     'channel_id': CHANNEL_IDS['premium_subscription']},
 
             ]
@@ -110,13 +115,22 @@ class SubscriptionService:
         async with self.async_session_maker() as session:
             result = await session.execute(
                 select(SubscriptionPlan).where(
-                    SubscriptionPlan.price == 20000,  # 200 ₽ * 100
-                    SubscriptionPlan.duration_days == 30
+                    SubscriptionPlan.name == DEFAULT_PLAN_NAME
                 )
             )
             plan = result.scalar_one_or_none()
             if not plan:
-                raise ValueError("Не найден план на 30 дней за 200₽")
+                # Попробуем найти по цене и длительности, если по имени не нашли (для совместимости)
+                result = await session.execute(
+                    select(SubscriptionPlan).where(
+                        SubscriptionPlan.price == DEFAULT_PLAN_PRICE,
+                        SubscriptionPlan.duration_days == DEFAULT_PLAN_DURATION
+                    )
+                )
+                plan = result.scalar_one_or_none()
+
+            if not plan:
+                raise ValueError(f"Не найден дефолтный план подписки ({DEFAULT_PLAN_NAME} или {DEFAULT_PLAN_DURATION} дней за {DEFAULT_PLAN_PRICE // 100}₽)")
             return plan
     
     
