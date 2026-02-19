@@ -7,57 +7,9 @@ services:
     env_file:
       - ./app/.env
     depends_on:
-      - redis
       - db
     restart: always
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis', port=6379); r.ping()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     working_dir: /app
-
-  celery:
-    build: .
-    command: celery -A reminders.celery worker --loglevel=info
-    env_file:
-      - ./app/.env
-    depends_on:
-      - redis
-      - db
-    restart: always
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis', port=6379); r.ping()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    working_dir: /app
-
-  celery-beat:
-    build: .
-    command: celery -A reminders.celery beat --loglevel=info
-    env_file:
-      - ./app/.env
-    depends_on:
-      - redis
-      - db
-    restart: always
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis', port=6379); r.ping()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    working_dir: /app
-
-  redis:
-    image: redis:7.0-alpine
-
-    restart: always
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   db:
     image: postgres:15-alpine
@@ -71,4 +23,4 @@ services:
       test: ["CMD-SHELL", "pg_isready -U aiogram"]
       interval: 10s
       timeout: 5s
-      retries: 5 
+      retries: 5
