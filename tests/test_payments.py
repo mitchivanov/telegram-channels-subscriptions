@@ -95,6 +95,17 @@ async def test_payment_error_handling(session, monkeypatch):
         message.answer.assert_called()
         assert "техническая ошибка" in message.answer.call_args[0][0]
 
+        # Check admin notification
+        # In conftest.py, ADMIN_USER_IDS is set to '123456789'
+        from app.main import bot
+        # Filter calls to send_message for admin ID
+        admin_calls = [
+            call for call in bot.send_message.mock_calls
+            if call.kwargs.get('chat_id') == '123456789'
+        ]
+        assert len(admin_calls) > 0
+        assert "Ошибка оплаты" in admin_calls[0].kwargs['text']
+
     finally:
         # Restore original method
         subscription_service.create_subscription = original_create

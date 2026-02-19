@@ -623,6 +623,24 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         session.add(payment_error)
                         await session.commit()
                         logging.info(f"[PAYMENT][ERROR_SAVED] Информация об ошибке сохранена в базу данных с ID={payment_error.id}")
+
+                        # Уведомление администратора
+                        for admin_id in ADMIN_USER_IDS:
+                            if not admin_id: continue
+                            try:
+                                await bot.send_message(
+                                    chat_id=admin_id,
+                                    text=f"🚨 <b>Ошибка оплаты!</b>\n\n"
+                                         f"Пользователь: {message.from_user.id} ({message.from_user.username or 'No username'})\n"
+                                         f"Сумма: {payment_info.total_amount / 100} {payment_info.currency}\n"
+                                         f"План ID: {plan_id}\n"
+                                         f"Ошибка: {str(e)[:200]}\n"
+                                         f"ID ошибки в БД: {payment_error.id}",
+                                    parse_mode='HTML'
+                                )
+                            except Exception as admin_notify_error:
+                                logging.error(f"Не удалось отправить уведомление админу {admin_id}: {admin_notify_error}")
+
                 except Exception as db_error:
                     logging.critical(f"[PAYMENT][DB_ERROR] Не удалось сохранить информацию об ошибке в базу данных: {str(db_error)}")
                 
@@ -731,6 +749,24 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         session.add(payment_error)
                         await session.commit()
                         logging.info(f"[PAYMENT][EXTEND][ERROR_SAVED] Информация об ошибке продления сохранена в БД с ID={payment_error.id}")
+
+                        # Уведомление администратора
+                        for admin_id in ADMIN_USER_IDS:
+                            if not admin_id: continue
+                            try:
+                                await bot.send_message(
+                                    chat_id=admin_id,
+                                    text=f"🚨 <b>Ошибка продления подписки!</b>\n\n"
+                                         f"Пользователь: {message.from_user.id} ({message.from_user.username or 'No username'})\n"
+                                         f"Сумма: {payment_info.total_amount / 100} {payment_info.currency}\n"
+                                         f"План ID: {plan_id}\n"
+                                         f"Ошибка: {str(e)[:200]}\n"
+                                         f"ID ошибки в БД: {payment_error.id}",
+                                    parse_mode='HTML'
+                                )
+                            except Exception as admin_notify_error:
+                                logging.error(f"Не удалось отправить уведомление админу {admin_id}: {admin_notify_error}")
+
                 except Exception as db_error:
                     logging.critical(f"[PAYMENT][EXTEND][DB_ERROR] Не удалось сохранить информацию об ошибке в БД: {str(db_error)}")
                 

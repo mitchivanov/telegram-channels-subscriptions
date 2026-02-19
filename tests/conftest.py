@@ -66,12 +66,22 @@ async def db_session_maker():
     subscription_service.async_session_maker = session_maker
 
     # Mock bot to prevent actual API calls
-    subscription_service.bot = AsyncMock()
-    subscription_service.bot.send_message = AsyncMock()
-    subscription_service.bot.ban_chat_member = AsyncMock()
-    subscription_service.bot.unban_chat_member = AsyncMock()
-    subscription_service.bot.revoke_chat_invite_link = AsyncMock()
-    subscription_service.bot.create_chat_invite_link = AsyncMock()
+    # Mock bot to prevent actual API calls
+    # We also mock the bot in app.main using sys.modules or just patching subscription_service.bot since main uses it
+    # However, app.main imports 'bot' globally. We need to patch that too.
+    mock_bot = AsyncMock()
+    mock_bot.send_message = AsyncMock()
+    mock_bot.ban_chat_member = AsyncMock()
+    mock_bot.unban_chat_member = AsyncMock()
+    mock_bot.revoke_chat_invite_link = AsyncMock()
+    mock_bot.create_chat_invite_link = AsyncMock()
+
+    subscription_service.bot = mock_bot
+
+    # Also patch app.main.bot if it exists in loaded modules
+    import sys
+    if 'app.main' in sys.modules:
+        sys.modules['app.main'].bot = mock_bot
 
     # Mock invite link object
     mock_invite = MagicMock()
