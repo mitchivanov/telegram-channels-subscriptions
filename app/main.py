@@ -93,19 +93,38 @@ async def start_command(message: types.Message, state: FSMContext):
                 db_user.first_name = first_name
                 session.add(db_user)
                 await session.commit()
-                
-    text1 = WELCOME_TEXT
-    text2 = "🔥Доступ к каналу с товарами от 60₽"
+
+    # Проверяем наличие активной подписки
+    subscription_info = await subscription_service.get_subscription_info(message.from_user.id)
     
-    await message.answer(text1, parse_mode='HTML',
-                         #reply_markup=await get_reply_keyboard(keyboard_type='start')
-                        )
-    premium_keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buy_subscription')]
-        ]
-    )
-    await message.answer(text2, reply_markup=premium_keyboard)
+    if subscription_info and subscription_info.get('is_active'):
+        # Если есть активная подписка, показываем "Личный кабинет"
+        days_left = subscription_info['days_left']
+        message_text = (
+            f"Добро пожаловать, {first_name}!\n\n"
+            f"✅ У вас есть активная подписка: {subscription_info['plan_name']}\n"
+            f"Действует до: {subscription_info['end_date'].strftime('%d.%m.%Y')}\n"
+            f"Осталось дней: {days_left}"
+        )
+
+        if subscription_info.get('invite_link'):
+            message_text += f"\n\nСсылка для входа в канал: {subscription_info['invite_link']}"
+            message_text += "\n\n⚠️ Эта ссылка доступна только вам. При переходе по ссылке вам нужно будет отправить запрос на вступление, который будет автоматически одобрен."
+
+        await message.answer(message_text, reply_markup=await get_inline_keyboard(keyboard_type='manage_existing_subscription'))
+    else:
+        # Если подписки нет, показываем приветствие и кнопку оплаты
+        text1 = WELCOME_TEXT
+        text2 = "🔥Доступ к каналу с товарами от 60₽"
+
+        await message.answer(text1, parse_mode='HTML')
+
+        premium_keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="Оплатить подписку", callback_data='buy_subscription')]
+            ]
+        )
+        await message.answer(text2, reply_markup=premium_keyboard)
 
 @dp.message(Command('subscription'))
 async def manage_subscription(message: types.Message, state: FSMContext):
@@ -604,6 +623,24 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         session.add(payment_error)
                         await session.commit()
                         logging.info(f"[PAYMENT][ERROR_SAVED] Информация об ошибке сохранена в базу данных с ID={payment_error.id}")
+
+                        # Уведомление администратора
+                        for admin_id in ADMIN_USER_IDS:
+                            if not admin_id: continue
+                            try:
+                                await bot.send_message(
+                                    chat_id=admin_id,
+                                    text=f"🚨 <b>Ошибка оплаты!</b>\n\n"
+                                         f"Пользователь: {message.from_user.id} ({message.from_user.username or 'No username'})\n"
+                                         f"Сумма: {payment_info.total_amount / 100} {payment_info.currency}\n"
+                                         f"План ID: {plan_id}\n"
+                                         f"Ошибка: {str(e)[:200]}\n"
+                                         f"ID ошибки в БД: {payment_error.id}",
+                                    parse_mode='HTML'
+                                )
+                            except Exception as admin_notify_error:
+                                logging.error(f"Не удалось отправить уведомление админу {admin_id}: {admin_notify_error}")
+
                 except Exception as db_error:
                     logging.critical(f"[PAYMENT][DB_ERROR] Не удалось сохранить информацию об ошибке в базу данных: {str(db_error)}")
                 
@@ -712,6 +749,24 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
                         session.add(payment_error)
                         await session.commit()
                         logging.info(f"[PAYMENT][EXTEND][ERROR_SAVED] Информация об ошибке продления сохранена в БД с ID={payment_error.id}")
+
+                        # Уведомление администратора
+                        for admin_id in ADMIN_USER_IDS:
+                            if not admin_id: continue
+                            try:
+                                await bot.send_message(
+                                    chat_id=admin_id,
+                                    text=f"🚨 <b>Ошибка продления подписки!</b>\n\n"
+                                         f"Пользователь: {message.from_user.id} ({message.from_user.username or 'No username'})\n"
+                                         f"Сумма: {payment_info.total_amount / 100} {payment_info.currency}\n"
+                                         f"План ID: {plan_id}\n"
+                                         f"Ошибка: {str(e)[:200]}\n"
+                                         f"ID ошибки в БД: {payment_error.id}",
+                                    parse_mode='HTML'
+                                )
+                            except Exception as admin_notify_error:
+                                logging.error(f"Не удалось отправить уведомление админу {admin_id}: {admin_notify_error}")
+
                 except Exception as db_error:
                     logging.critical(f"[PAYMENT][EXTEND][DB_ERROR] Не удалось сохранить информацию об ошибке в БД: {str(db_error)}")
                 
@@ -853,35 +908,6 @@ async def resolve_payment_error(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"Произошла ошибка: {str(e)}")
 
-async def monitor_subscriptions():
-    """Фоновая задача для мониторинга подписок и отзыва доступа"""
-    last_check = datetime.utcnow()
-    while True:
-        try:
-            now = datetime.utcnow()
-
-            # Напоминания за 24 часа до окончания
-            await subscription_service.process_24h_reminders()
-
-            # Отзыв доступа для истекших подписок
-            expired = await subscription_service.get_expired_subscriptions()
-            for sub in expired:
-                try:
-                    # Отзываем доступ и ссылку (invite_link будет очищен)
-                    logging.info(f"Отзыв доступа и ссылки для истекшей подписки {sub.id}, user_id={sub.user_id}")
-                    await subscription_service.remove_user_access(sub)
-                except Exception as e:
-                    user_id = getattr(sub, 'user_id', '?')
-                    logging.error(f"Ошибка при отзыве доступа у пользователя (sub_id={sub.id}, user_id={user_id}): {e}\n{traceback.format_exc()}")
-
-            # Проверяем подписки, которые истекли за последние 2 минуты, и отправляем уведомления
-            await subscription_service.process_expired_notifications(last_check, now)
-
-            last_check = now
-        except Exception as e:
-            logging.error(f"Ошибка в задаче мониторинга подписок: {e}\n{traceback.format_exc()}")
-        await asyncio.sleep(60)
-
 async def main():
     """Запуск бота"""
     logging.basicConfig(level=logging.INFO)
@@ -892,15 +918,8 @@ async def main():
     await async_init_db()  # Сначала создаём таблицы!
     await subscription_service._init_subscription_plans()  # Потом инициализируем тарифы
 
-    try:
-        # Запускаем мониторинг подписок параллельно с polling'ом
-        await asyncio.gather(
-            monitor_subscriptions(),
-            dp.start_polling(bot)
-        )
-    finally:
-        # Закрываем соединение с базой данных при завершении работы
-        subscription_service.close()
+    # Запускаем поллинг (мониторинг подписок теперь выполняется через Celery)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main()) 
