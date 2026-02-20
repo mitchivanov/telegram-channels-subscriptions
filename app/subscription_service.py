@@ -1,5 +1,6 @@
 from app.database import async_init_db, get_async_session_maker, User, SubscriptionPlan, UserSubscription
 from app.subscription_manager import SubscriptionManager
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -505,12 +506,11 @@ class SubscriptionService:
         three_hours_ago = now - timedelta(hours=3)
 
         async with self.async_session_maker() as session:
-            # Находим пользователей без активной подписки, зарегистрированных более 3 часов назад
             result = await session.execute(
                 select(User).where(
                     and_(
                         User.created_at <= three_hours_ago,
-                        User.first_start_reminder_sent  == False,
+                        User.first_start_reminder_sent == False,
                         ~User.subscriptions.any(UserSubscription.is_active == True)
                     )
                 )
@@ -525,25 +525,30 @@ class SubscriptionService:
                         f"за кешбэк 100 %. Осталось только оплатить подписку — сделаем это прямо сейчас?\n\n"
                         f"Начните зарабатывать и экономить уже сегодня💥"
                     )
-
                     await self.bot.send_message(
                         chat_id=user.telegram_user_id,
                         text=text,
                         reply_markup=self._get_payment_keyboard()
                     )
-
-                    user.first_start_reminder_sent  = True
+                    user.first_start_reminder_sent = True
                     session.add(user)
                     logging.info(f"Отправлено напоминание о регистрации пользователю {user.telegram_user_id}")
+
+                except (TelegramForbiddenError, TelegramBadRequest) as e:
+                    # Бот заблокирован или аккаунт удалён — больше не пытаемся
+                    user.first_start_reminder_sent = True
+                    user.is_active = False
+                    session.add(user)
+                    logging.info(f"Пользователь {user.telegram_user_id} недоступен ({e}), помечаем флаг")
+
                 except Exception as e:
                     logging.error(f"Ошибка при отправке напоминания о регистрации пользователю {user.telegram_user_id}: {e}")
+                    # Флаг НЕ ставим — попробуем в следующий раз
 
             await session.commit()
 
     async def send_subscription_reminders(self):
         """Рассылка за сутки до окончания подписки"""
-        # Alias logic to make it consistent with Celery task naming and improve logic
-        # Original process_24h_reminders logic was similar but let's use the robust one from reminders.py
         if not self.bot:
             logging.error("Бот не инициализирован в SubscriptionService")
             return
@@ -552,7 +557,6 @@ class SubscriptionService:
         tomorrow = now + timedelta(hours=24)
 
         async with self.async_session_maker() as session:
-            # Находим подписки, истекающие через 24 часа
             result = await session.execute(
                 select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                     and_(
@@ -566,27 +570,31 @@ class SubscriptionService:
             subscriptions = result.scalars().all()
 
             for sub in subscriptions:
+                user = sub.user
+                if not user:
+                    continue
                 try:
-                    user = sub.user
+                    text = (
+                        "Внимание: завтра Ваша подписка истекает. "
+                        "Чтобы не прерывать доступ к кешбэку 100 %, "
+                        "оформите оплату на следующий месяц уже сегодня."
+                    )
+                    await self.bot.send_message(
+                        chat_id=user.telegram_user_id,
+                        text=text,
+                        reply_markup=self._get_payment_keyboard()
+                    )
+                    sub.reminder_sent = True
+                    session.add(sub)
+                    logging.info(f"Отправлено напоминание за сутки пользователю {user.telegram_user_id}")
 
-                    if user:
-                        text = (
-                            "Внимание: завтра Ваша подписка истекает. "
-                            "Чтобы не прерывать доступ к кешбэку 100 %, "
-                            "оформите оплату на следующий месяц уже сегодня."
-                        )
+                except (TelegramForbiddenError, TelegramBadRequest) as e:
+                    sub.reminder_sent = True  # Не можем доставить — снимаем с очереди
+                    session.add(sub)
+                    logging.info(f"Пользователь {user.telegram_user_id} недоступен ({e}), пропускаем")
 
-                        await self.bot.send_message(
-                            chat_id=user.telegram_user_id,
-                            text=text,
-                            reply_markup=self._get_payment_keyboard()
-                        )
-
-                        sub.reminder_sent = True
-                        session.add(sub)
-                        logging.info(f"Отправлено напоминание за сутки пользователю {user.telegram_user_id}")
                 except Exception as e:
-                    logging.error(f"Ошибка при отправке напоминания за сутки: {e}")
+                    logging.error(f"Ошибка при отправке напоминания за сутки пользователю {user.telegram_user_id}: {e}")
 
             await session.commit()
 
@@ -600,7 +608,6 @@ class SubscriptionService:
         end_of_today = now.replace(hour=23, minute=59, second=59)
 
         async with self.async_session_maker() as session:
-            # Находим подписки, истекающие сегодня
             result = await session.execute(
                 select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                     and_(
@@ -614,31 +621,35 @@ class SubscriptionService:
             subscriptions = result.scalars().all()
 
             for sub in subscriptions:
+                user = sub.user
+                if not user:
+                    continue
                 try:
-                    user = sub.user
+                    text = (
+                        "Не дайте подписке закончиться! Сегодня последний день — "
+                        "продлите доступ к каналу и продолжайте получать кешбэк 100 %."
+                    )
+                    await self.bot.send_message(
+                        chat_id=user.telegram_user_id,
+                        text=text,
+                        reply_markup=self._get_payment_keyboard()
+                    )
+                    sub.last_day_reminder_sent = True
+                    session.add(sub)
+                    logging.info(f"Отправлено напоминание в последний день пользователю {user.telegram_user_id}")
 
-                    if user:
-                        text = (
-                            "Не дайте подписке закончиться! Сегодня последний день — "
-                            "продлите доступ к каналу и продолжайте получать кешбэк 100 %."
-                        )
+                except (TelegramForbiddenError, TelegramBadRequest) as e:
+                    sub.last_day_reminder_sent = True
+                    session.add(sub)
+                    logging.info(f"Пользователь {user.telegram_user_id} недоступен ({e}), пропускаем")
 
-                        await self.bot.send_message(
-                            chat_id=user.telegram_user_id,
-                            text=text,
-                            reply_markup=self._get_payment_keyboard()
-                        )
-
-                        sub.last_day_reminder_sent = True
-                        session.add(sub)
-                        logging.info(f"Отправлено напоминание в последний день пользователю {user.telegram_user_id}")
                 except Exception as e:
-                    logging.error(f"Ошибка при отправке напоминания в последний день: {e}")
+                    logging.error(f"Ошибка при отправке напоминания в последний день пользователю {user.telegram_user_id}: {e}")
 
             await session.commit()
 
     async def send_expired_reminders(self):
-        """Рассылка в день истечения подписки (Stateless)"""
+        """Рассылка после истечения подписки"""
         if not self.bot:
             logging.error("Бот не инициализирован в SubscriptionService")
             return
@@ -646,7 +657,6 @@ class SubscriptionService:
         now = datetime.utcnow()
 
         async with self.async_session_maker() as session:
-            # Находим подписки, которые только что истекли
             result = await session.execute(
                 select(UserSubscription).options(joinedload(UserSubscription.user)).where(
                     and_(
@@ -659,28 +669,33 @@ class SubscriptionService:
             subscriptions = result.scalars().all()
 
             for sub in subscriptions:
+                user = sub.user
+                if not user:
+                    continue
                 try:
-                    user = sub.user
+                    first_name = user.first_name or "Друг"
+                    text = (
+                        f"{first_name}, привет! Сообщаем, что доступ к каналу закрыт — подписка истекла.\n\n"
+                        f"Не хотите пропустить новые предложения с кешбэком 100 %? "
+                        f"Продлите доступ прямо сейчас."
+                    )
+                    await self.bot.send_message(
+                        chat_id=user.telegram_user_id,
+                        text=text,
+                        reply_markup=self._get_payment_keyboard()
+                    )
+                    sub.expired_reminder_sent = True
+                    session.add(sub)
+                    logging.info(f"Отправлено уведомление об истечении пользователю {user.telegram_user_id}")
 
-                    if user:
-                        first_name = user.first_name or "Друг"
-                        text = (
-                            f"{first_name}, привет! Сообщаем, что доступ к каналу закрыт — подписка истекла.\n\n"
-                            f"Не хотите пропустить новые предложения с кешбэком 100 %? "
-                            f"Продлите доступ прямо сейчас."
-                        )
+                except (TelegramForbiddenError, TelegramBadRequest) as e:
+                    # Не можем доставить — ставим флаг, иначе будет спам в логах каждый час
+                    sub.expired_reminder_sent = True
+                    session.add(sub)
+                    logging.info(f"Пользователь {user.telegram_user_id} недоступен ({e}), пропускаем")
 
-                        await self.bot.send_message(
-                            chat_id=user.telegram_user_id,
-                            text=text,
-                            reply_markup=self._get_payment_keyboard()
-                        )
-
-                        sub.expired_reminder_sent = True
-                        session.add(sub)
-                        logging.info(f"Отправлено напоминание об истечении пользователю {user.telegram_user_id}")
                 except Exception as e:
-                    logging.error(f"Ошибка при отправке напоминания об истечении: {e}")
+                    logging.error(f"Ошибка при отправке уведомления об истечении пользователю {user.telegram_user_id}: {e}")
 
             await session.commit()
 
