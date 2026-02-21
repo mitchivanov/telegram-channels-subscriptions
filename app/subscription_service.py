@@ -166,12 +166,7 @@ class SubscriptionService:
                     SubscriptionPlan.price == 18000
                 )
             )
-            plan = result.scalar_one_or_none()
-            if not plan:
-                 # Fallback if creation hasn't happened yet for some reason
-                 return None
-            return plan
-    
+            return result.scalar_one_or_none()
     
     async def get_subscription_plan(self, subscription_type, duration):
         """Получение подходящего плана подписки по типу и длительности"""
@@ -186,12 +181,6 @@ class SubscriptionService:
         async with self.async_session_maker() as session:
             result = await session.execute(select(SubscriptionPlan).where(SubscriptionPlan.name == plan_name))
             plan = result.scalar_one_or_none()
-        
-        # Если не нашли старый план, попробуем вернуть один из новых, если подходит по длительности
-        if not plan:
-             # Fallback logic could be added here
-             pass
-
         if not plan:
             raise ValueError(f"План подписки {plan_name} не найден")
         
@@ -358,7 +347,6 @@ class SubscriptionService:
             logging.error("Бот не инициализирован в SubscriptionService")
             return False
 
-        # FIX: Открываем новую сессию и загружаем объект заново, чтобы избежать конфликта сессий
         async with self.async_session_maker() as session:
             async with session.begin():
                 # Перечитываем подписку в текущей сессии по ID переданного объекта
@@ -380,7 +368,23 @@ class SubscriptionService:
                     logging.error(f"Пользователь для подписки {db_subscription.id} не найден")
                     return False
 
-                # Логика бана в Telegram
+                # === ИСПРАВЛЕНИЕ №1: Защита от случайного кика (если есть другая активная подписка) ===
+                active_check = await session.execute(
+                    select(UserSubscription).where(
+                        UserSubscription.user_id == user.id,
+                        UserSubscription.is_active == True,
+                        UserSubscription.end_date > datetime.utcnow(),
+                        UserSubscription.id != db_subscription.id
+                    )
+                )
+                if active_check.scalars().first():
+                    logging.info(f"ЗАЩИТА: Юзер {user.telegram_user_id} имеет другую активную подписку. Кик отменен.")
+                    db_subscription.is_active = False
+                    db_subscription.invite_link = None
+                    session.add(db_subscription)
+                    return True
+                # ======================================================================================
+
                 removed = False
                 for attempt in range(max_retries):
                     try:
@@ -451,42 +455,6 @@ class SubscriptionService:
                 UserSubscription.end_date < now
             ))
             return result.scalars().all()
-
-    async def process_24h_reminders(self):
-        """Отправляет напоминания за 24 часа до окончания подписки"""
-        if not self.bot:
-            logging.error("Бот не инициализирован в SubscriptionService")
-            return
-
-        try:
-            expiring = await self.get_expiring_subscriptions(hours=24)
-            for sub in expiring:
-                if not getattr(sub, 'reminder_sent', False):
-                    # Открываем сессию для обновления флага
-                    async with self.async_session_maker() as session:
-                         # Обновляем объект, привязывая его к новой сессии, если нужно, или загружаем заново
-                        stmt = select(UserSubscription).where(UserSubscription.id == sub.id)
-                        result = await session.execute(stmt)
-                        db_sub = result.scalar_one_or_none()
-
-                        if db_sub and not db_sub.reminder_sent:
-                            user_stmt = select(User).where(User.id == db_sub.user_id)
-                            user_result = await session.execute(user_stmt)
-                            user = user_result.scalar_one_or_none()
-
-                            if user:
-                                try:
-                                    await self.bot.send_message(
-                                        chat_id=user.telegram_user_id,
-                                        text="⏰ Ваша подписка истекает через 24 часа! Продлите её, чтобы не потерять доступ к каналу."
-                                    )
-                                    db_sub.reminder_sent = True
-                                    session.add(db_sub)
-                                    await session.commit()
-                                except Exception as e:
-                                    logging.error(f"Ошибка при отправке напоминания пользователю {user.telegram_user_id}: {e}")
-        except Exception as e:
-            logging.error(f"Ошибка в process_24h_reminders: {e}\n{traceback.format_exc()}")
 
     def _get_payment_keyboard(self):
         """Клавиатура с кнопкой оплаты"""
@@ -672,6 +640,22 @@ class SubscriptionService:
                 user = sub.user
                 if not user:
                     continue
+                
+                # === ИСПРАВЛЕНИЕ №2: Защита от спама (если человек уже оплатил новую подписку) ===
+                active_check = await session.execute(
+                    select(UserSubscription).where(
+                        UserSubscription.user_id == user.id,
+                        UserSubscription.is_active == True,
+                        UserSubscription.end_date > now
+                    )
+                )
+                if active_check.scalars().first():
+                    # Тихо помечаем, что уведомление об истечении "отправлено", чтобы больше сюда не возвращаться
+                    sub.expired_reminder_sent = True
+                    session.add(sub)
+                    continue
+                # =================================================================================
+
                 try:
                     first_name = user.first_name or "Друг"
                     text = (
@@ -695,7 +679,7 @@ class SubscriptionService:
                     logging.info(f"Пользователь {user.telegram_user_id} недоступен ({e}), пропускаем")
 
                 except Exception as e:
-                    logging.error(f"Ошибка при отправке уведомления об истечении пользователю {user.telegram_user_id}: {e}")
+                    logging.error(f"Ошибка при отправке уведомления об истечении: {e}")
 
             await session.commit()
 
@@ -723,7 +707,7 @@ class SubscriptionService:
                     logging.error(f"Ошибка при отзыве доступа для подписки {sub.id}: {e}")
 
     async def force_cleanup_expired(self):
-        """Принудительная зачистка всех, у кого истекла дата, даже если is_active=False"""
+        """Принудительная зачистка всех, у кого истекла дата"""
         if not self.bot:
             logging.error("Бот не инициализирован в SubscriptionService")
             return
@@ -745,11 +729,8 @@ class SubscriptionService:
             )
             expired_subs = result.scalars().all()
 
-            logging.info(f"CLEANUP: Найдено {len(expired_subs)} подписок для проверки удаления.")
-
             for sub in expired_subs:
                 try:
-                    # Получаем пользователя и план
                     user = sub.user
                     plan = sub.plan
 
@@ -757,13 +738,27 @@ class SubscriptionService:
                         channel_id = plan.channel_id
                         user_tg_id = user.telegram_user_id
 
-                        # Пытаемся кикнуть из канала (Kick + Unban)
-                        try:
-                            # Сначала проверяем статус (чтобы не спамить запросами API, если юзера там нет)
-                            member = await self.bot.get_chat_member(chat_id=channel_id, user_id=user_tg_id)
+                        # === ИСПРАВЛЕНИЕ №3: Защита "Бульдозера" ===
+                        active_check = await session.execute(
+                            select(UserSubscription).where(
+                                UserSubscription.user_id == user.id,
+                                UserSubscription.is_active == True,
+                                UserSubscription.end_date > now
+                            )
+                        )
+                        if active_check.scalars().first():
+                            # У пользователя есть новая активная подписка. Гасим статус старой без кика.
+                            if sub.is_active:
+                                sub.is_active = False
+                                session.add(sub)
+                                await session.commit()
+                            continue
+                        # ============================================
 
+                        try:
+                            member = await self.bot.get_chat_member(chat_id=channel_id, user_id=user_tg_id)
                             if member.status not in ('left', 'kicked'):
-                                logging.warning(f"CLEANUP: Найден нелегал! User {user_tg_id} (sub {sub.id}) всё ещё в канале. Удаляем...")
+                                logging.warning(f"CLEANUP: Найден нелегал! User {user_tg_id} всё ещё в канале. Удаляем...")
                                 await self.bot.ban_chat_member(chat_id=channel_id, user_id=user_tg_id)
                                 await self.bot.unban_chat_member(chat_id=channel_id, user_id=user_tg_id, only_if_banned=True)
 
@@ -790,15 +785,4 @@ class SubscriptionService:
                 except Exception as outer_e:
                     logging.error(f"CLEANUP Critical error on sub {sub.id}: {outer_e}")
 
-    # Старые методы для совместимости (если они еще где-то вызываются, хотя монитор удален)
-    async def process_expired_notifications(self, last_check, now):
-        """Deprecated: use send_expired_reminders instead"""
-        await self.send_expired_reminders()
-
-    async def process_24h_reminders(self):
-        """Deprecated: use send_subscription_reminders instead"""
-        await self.send_subscription_reminders()
-
-# Глобальный экземпляр сервиса подписок
 subscription_service = SubscriptionService()
-# (async инициализация тарифных планов вызывается отдельно в main/startup)
