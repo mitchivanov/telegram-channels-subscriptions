@@ -13,7 +13,7 @@ import logging
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from app.subscription_service import subscription_service, CHANNEL_IDS, DEFAULT_PLAN_PRICE
+from app.subscription_service import subscription_service, CHANNEL_IDS
 from app.database import User, UserSubscription, SubscriptionPlan, PaymentError, async_init_db
 from aiogram.types import LabeledPrice
 from aiogram.types.message import ContentType
@@ -947,7 +947,7 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     logging.info("Starting bot")
     logging.info(f"Платежный токен: {TELEGRAM_PAYMENT_TOKEN[:10]}... (Тестовый режим: {IS_TEST_MODE})")
-    logging.info(f"Каналы: Базовый: {CHANNEL_IDS['basic_subscription']}, Премиум: {CHANNEL_IDS['premium_subscription']}")
+    logging.info(f"Каналы: Премиум: {CHANNEL_IDS['premium_subscription']}")
 
     await async_init_db()  # Сначала создаём таблицы!
     await subscription_service._init_subscription_plans()  # Потом инициализируем тарифы

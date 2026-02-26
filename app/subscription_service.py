@@ -17,14 +17,8 @@ load_dotenv()
 
 PAYMENT_TEST_MODE = os.getenv('PAYMENT_TEST_MODE', 'False').lower() in ('true', '1', 't')
 
-# Дефолтные значения для основного плана подписки
-DEFAULT_PLAN_NAME = os.getenv('DEFAULT_PLAN_NAME', 'Premium кешбэк')
-DEFAULT_PLAN_PRICE = int(os.getenv('DEFAULT_PLAN_PRICE', 20000))
-DEFAULT_PLAN_DURATION = int(os.getenv('DEFAULT_PLAN_DURATION', 30))
-
 # Словарь соответствия callback_data и реальных значений
 SUBSCRIPTION_TYPE_MAP = {
-    'basic_subscription': 'Базовый',
     'premium_subscription': 'Премиум'
 }
 
@@ -35,12 +29,10 @@ if PAYMENT_TEST_MODE:
     DURATION_MAP['5_min'] = 5 / (24 * 60)  # 5 минут в днях
 
 # ID каналов для разных типов подписок из .env
-BASIC_CHANNEL_ID = os.getenv('BASIC_CHANNEL_ID')
 PREMIUM_CHANNEL_ID = os.getenv('PREMIUM_CHANNEL_ID')
-if not BASIC_CHANNEL_ID or not PREMIUM_CHANNEL_ID:
-    raise ValueError("Не заданы переменные окружения BASIC_CHANNEL_ID и PREMIUM_CHANNEL_ID. Укажите их в .env!")
+if not PREMIUM_CHANNEL_ID:
+    raise ValueError("Не задана переменная окружения PREMIUM_CHANNEL_ID. Укажите её в .env!")
 CHANNEL_IDS = {
-    'basic_subscription': BASIC_CHANNEL_ID,
     'premium_subscription': PREMIUM_CHANNEL_ID
 }
 
